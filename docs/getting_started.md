@@ -245,6 +245,12 @@ python -c "import crisp_gym"
 
 1. This will set some environment variable pre-installation as well as checking that you defined the previous script properly.
 
+You can also check that your configs are set up with:
+
+```sh
+pixi shell crisp-check-config
+```
+
 If the previous steps worked, then you are good to go.
 
 ### Teleoperation: Record data in [LeRobotFormat](https://github.com/huggingface/lerobot)
@@ -263,7 +269,7 @@ For your specific setup you need to:
 
 Then, to record data use:
 ```sh
-pixi run -e humble-lerobot python scripts/record_lerobot_format_leader_follower.py \
+pixi run -e humble-lerobot crisp-record-leader-follower \
    --repo-id <your_account>/<repo_name> # (1)!
 ```
 
@@ -366,7 +372,7 @@ a similar record script to [`scripts/record_lerobot_format_leader_follower.py`](
 
 You can use LeRobot train scripts to train a policy simply by running:
 ```sh
-pixi run -e lerobot python -m lerobot.scripts.train \
+pixi run -e lerobot python -m lerobot.scripts.lerobot-train \
           --dataset.repo_id=<your_account>/<repo_name> \
           --policy.type=diffusion \
           --policy.push_to_hub=false
@@ -382,7 +388,7 @@ Check [LeRobot](https://github.com/huggingface/lerobot) for more information.
 
 After training with LeRobot, you can deploy the policy with:
 ```sh
-pixi run -e humble-lerobot python scripts/deploy_policy.py # (1)!
+pixi run -e humble-lerobot crisp-deploy-policy  # (1)!
 ```
 
 1. The script will interactively allow you to choose a model inside `outputs/train`. If you want to explicitly pass a path you can override it with `--path`
