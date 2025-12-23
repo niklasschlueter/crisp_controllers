@@ -36,7 +36,7 @@ TwistBroadcaster::state_interface_configuration() const {
 
 controller_interface::return_type
 TwistBroadcaster::update(const rclcpp::Time &time,
-                         const rclcpp::Duration & /*period*/) {
+                         const rclcpp::Duration &period) {
 
     size_t num_joints = params_.joints.size();
     Eigen::VectorXd q_pin = Eigen::VectorXd::Zero(model_.nq);
@@ -67,27 +67,28 @@ TwistBroadcaster::update(const rclcpp::Time &time,
     auto current_velocity = pinocchio::getFrameVelocity(model_, data_, end_effector_frame_id);
 
     // Decide whether to publish the twist or not
-    bool should_publish = true;
-    if (params_.publish_frequency > 0.0) {
-        auto time_since_last = time - last_publish_time_;
-        auto min_interval = rclcpp::Duration::from_seconds(1.0 / params_.publish_frequency);
-        should_publish = time_since_last >= min_interval;
-    }
+    publish_elapsed_ = publish_elapsed_ + period;
+    bool should_publish = (publish_elapsed_ >= publish_interval_) || 
+                            (publish_interval_.nanoseconds() == 0); 
 
-    if (should_publish && realtime_twist_publisher_ && realtime_twist_publisher_->trylock())
+    if (should_publish && realtime_twist_publisher_)
     {
-        auto & twist_msg = realtime_twist_publisher_->msg_;
-
-        twist_msg.header.stamp = time;
-        twist_msg.header.frame_id = params_.end_effector_frame;
-        twist_msg.twist.linear.x = current_velocity.linear()[0];
-        twist_msg.twist.linear.y = current_velocity.linear()[1];
-        twist_msg.twist.linear.z = current_velocity.linear()[2];
-        twist_msg.twist.angular.x = current_velocity.angular()[0];
-        twist_msg.twist.angular.y = current_velocity.angular()[1];
-        twist_msg.twist.angular.z = current_velocity.angular()[2];
-        realtime_twist_publisher_->unlockAndPublish();
-        last_publish_time_ = time;
+        if (realtime_twist_publisher_->trylock()) {
+            auto & twist_msg = realtime_twist_publisher_->msg_;
+            twist_msg.header.stamp = time;
+            twist_msg.header.frame_id = params_.end_effector_frame;
+            twist_msg.twist.linear.x = current_velocity.linear()[0];
+            twist_msg.twist.linear.y = current_velocity.linear()[1];
+            twist_msg.twist.linear.z = current_velocity.linear()[2];
+            twist_msg.twist.angular.x = current_velocity.angular()[0];
+            twist_msg.twist.angular.y = current_velocity.angular()[1];
+            twist_msg.twist.angular.z = current_velocity.angular()[2];
+            realtime_twist_publisher_->unlockAndPublish();
+            
+            publish_elapsed_ = publish_elapsed_ - publish_interval_;
+            // clamp to publish only 1 time even if missed multiple intervals
+            publish_elapsed_ = std::min(publish_elapsed_, publish_interval_);  
+        }
     }
 
     return controller_interface::return_type::OK;
@@ -172,12 +173,19 @@ CallbackReturn TwistBroadcaster::on_configure(
         std::make_shared<realtime_tools::RealtimePublisher<geometry_msgs::msg::TwistStamped>>(
             twist_publisher_);
 
-    last_publish_time_ = this->get_node()->now();
+    if (params_.publish_frequency > 0.0) {
+        publish_interval_ = rclcpp::Duration::from_seconds(1.0 / params_.publish_frequency);
+    } else {
+        publish_interval_ = rclcpp::Duration(0, 0);  // publish every cycle
+    }
+
     return CallbackReturn::SUCCESS;
 }
 
 CallbackReturn TwistBroadcaster::on_activate(
     const rclcpp_lifecycle::State & /*previous_state*/) {
+    // reset publish time accumulation
+    publish_elapsed_ = rclcpp::Duration(0, 0); 
     return CallbackReturn::SUCCESS;
 }
 

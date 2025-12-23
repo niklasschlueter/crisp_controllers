@@ -18,11 +18,37 @@ endif()
 # Enable precompiled headers
 option(USE_PRECOMPILED_HEADERS "Use precompiled headers" ON)
 
-if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    add_compile_options(-Wall -Wextra -Wpedantic)
+option(CHECK_TIDY "Adds clang-tidy tests" OFF)
+
+option(ENABLE_NATIVE_OPTIMIZATION
+  "Enable CPU-specific optimizations (-march=native)"
+  OFF
+)
+
+# Default to release build
+if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
-option(CHECK_TIDY "Adds clang-tidy tests" OFF)
+# Compiler flags by build type
+add_library(project_compile_options INTERFACE)
+target_compile_options(project_compile_options INTERFACE
+  # Warnings (build only)
+  $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
+
+  # Debug
+  $<$<AND:$<CONFIG:Debug>,$<CXX_COMPILER_ID:GNU,Clang>>:-O0 -g>
+
+  # Release
+  $<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:GNU,Clang>>:-O3 -DNDEBUG>
+)
+
+# Optional CPU-specific optimizations (non-portable)
+if(ENABLE_NATIVE_OPTIMIZATION)
+  target_compile_options(project_compile_options INTERFACE
+    $<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:GNU,Clang>>:-march=native>
+)
+endif()
 
 # find dependencies
 find_package(ament_cmake REQUIRED)
@@ -63,6 +89,11 @@ add_library(
         src/pose_broadcaster.cpp
         src/torque_feedback_controller.cpp
         src/twist_broadcaster.cpp
+)
+
+target_link_libraries(${PROJECT_NAME}
+  PRIVATE
+    project_compile_options
 )
 
 target_include_directories(${PROJECT_NAME}

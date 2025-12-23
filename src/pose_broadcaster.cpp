@@ -35,7 +35,7 @@ PoseBroadcaster::state_interface_configuration() const {
 
 controller_interface::return_type
 PoseBroadcaster::update(const rclcpp::Time &time,
-                                   const rclcpp::Duration & /*period*/) {
+                                   const rclcpp::Duration &period) {
 
   size_t num_joints = params_.joints.size();
   Eigen::VectorXd q_pin = Eigen::VectorXd::Zero(model_.nq);
@@ -63,28 +63,28 @@ PoseBroadcaster::update(const rclcpp::Time &time,
       Eigen::Quaterniond(current_pose.rotation());
 
   // Decide whether to publish the pose or not
-  bool should_publish = true;
-  if (params_.publish_frequency > 0.0) {
-    auto time_since_last = time - last_publish_time_;
-    auto min_interval = rclcpp::Duration::from_seconds(1.0 / params_.publish_frequency);
-    should_publish = time_since_last >= min_interval;
-  }
-
-  if (should_publish && realtime_pose_publisher_ && realtime_pose_publisher_->trylock())
+  publish_elapsed_ = publish_elapsed_ + period;
+  bool should_publish = (publish_elapsed_ >= publish_interval_) || 
+                          (publish_interval_.nanoseconds() == 0); 
+  if (should_publish && realtime_pose_publisher_)
   {
-    auto & pose_msg = realtime_pose_publisher_->msg_;
-
-    pose_msg.header.stamp = time;
-    pose_msg.header.frame_id = params_.base_frame;
-    pose_msg.pose.position.x = current_pose.translation()[0];
-    pose_msg.pose.position.y = current_pose.translation()[1];
-    pose_msg.pose.position.z = current_pose.translation()[2];
-    pose_msg.pose.orientation.x = current_quaternion.x();
-    pose_msg.pose.orientation.y = current_quaternion.y();
-    pose_msg.pose.orientation.z = current_quaternion.z();
-    pose_msg.pose.orientation.w = current_quaternion.w();
-    realtime_pose_publisher_->unlockAndPublish();
-    last_publish_time_ = time;
+    if (realtime_pose_publisher_->trylock()) {
+      auto & pose_msg = realtime_pose_publisher_->msg_;
+      pose_msg.header.stamp = time;
+      pose_msg.header.frame_id = params_.base_frame;
+      pose_msg.pose.position.x = current_pose.translation()[0];
+      pose_msg.pose.position.y = current_pose.translation()[1];
+      pose_msg.pose.position.z = current_pose.translation()[2];
+      pose_msg.pose.orientation.x = current_quaternion.x();
+      pose_msg.pose.orientation.y = current_quaternion.y();
+      pose_msg.pose.orientation.z = current_quaternion.z();
+      pose_msg.pose.orientation.w = current_quaternion.w();
+      realtime_pose_publisher_->unlockAndPublish();
+      
+      publish_elapsed_ = publish_elapsed_ - publish_interval_;
+      // clamp to publish only 1 time even if missed multiple intervals
+      publish_elapsed_ = std::min(publish_elapsed_, publish_interval_);      
+    }
   }
 
   return controller_interface::return_type::OK;
@@ -168,12 +168,19 @@ CallbackReturn PoseBroadcaster::on_configure(
       std::make_shared<realtime_tools::RealtimePublisher<geometry_msgs::msg::PoseStamped>>(
         pose_publisher_);
   
-  last_publish_time_ = this->get_node()->now();
+  if (params_.publish_frequency > 0.0) {
+    publish_interval_ = rclcpp::Duration::from_seconds(1.0 / params_.publish_frequency);
+  } else {
+    publish_interval_ = rclcpp::Duration(0, 0);  // publish every cycle
+  }
+  
   return CallbackReturn::SUCCESS;
 }
 
 CallbackReturn PoseBroadcaster::on_activate(
     const rclcpp_lifecycle::State & /*previous_state*/) {
+  // reset publish time accumulation
+  publish_elapsed_ = rclcpp::Duration(0, 0); 
   return CallbackReturn::SUCCESS;
 }
 

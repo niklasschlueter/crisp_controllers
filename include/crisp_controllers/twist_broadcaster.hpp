@@ -65,7 +65,9 @@ private:
 
   Eigen::VectorXd q;
   Eigen::VectorXd q_dot;
-  rclcpp::Time last_publish_time_;
+  
+  rclcpp::Duration publish_elapsed_{0,0};
+  rclcpp::Duration publish_interval_{0,0};
 };
 
 } // namespace crisp_controllers
