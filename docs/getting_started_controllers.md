@@ -31,7 +31,7 @@ Grippers that we tested are:
 
 - **Franka Hand**: a node is included in the [fr3 pixi](https://github.com/danielsanjosepro/pixi_franka_ros2) and [panda pixi](https://github.com/lvjonok/pixi_panda_ros2) repositories which is started automatically with the robot. If the Franka Hand is not connected, the node will crash silently. Checkout [this config](https://github.com/utiasDSL/crisp_py/blob/main/crisp_py/config/grippers/gripper_franka.yaml) for using it with `crisp_py`.
 - Any **Dynamixel**-based gripper: https://github.com/danielsanjosepro/dynamixel_wrapper - check README.md
-- **Robotiq 2F-85**: work in progress...
+- **Robotiq 2F-85**: https://github.com/danielsanjosepro/pixi_robotiq_ros2
 
 ### Cameras
 

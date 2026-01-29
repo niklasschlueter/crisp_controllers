@@ -134,6 +134,28 @@ Our controllers have been tested in real hardware on the following robots:
   <!-- </div> -->
 </div>
 
+Grippers tested in real hardware:
+<div class="gripper-grid">
+  <div class="gripper-card">
+    <a href="https://github.com/danielsanjosepro/pixi_robotiq_ros2">
+        <img src="media/robotiq_visual.png">
+        <div class="gripper-name">Robotiq Gripper 2F-85</div>
+    </a>
+  </div>
+  <div class="gripper-card">
+    <a href="https://github.com/TUM-lsy/aloha4franka">
+        <img src="media/aloha4franka_visual.png">
+        <div class="gripper-name">aloha4franka / dynamixel-based gripper</div>
+    </a>
+  </div>
+  <div class="gripper-card">
+    <a href="https://github.com/danielsanjosepro/pixi_franka_ros2">
+        <img src="media/franka_hand_visual.png">
+        <div class="gripper-name">Franka Hand</div>
+    </a>
+  </div>
+</div>
+
 <!---->
 <!-- ... and in simulation on: -->
 <!-- <div class="robot-grid"> -->
