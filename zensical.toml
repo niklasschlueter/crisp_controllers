@@ -1,6 +1,6 @@
 
 [project]
-site_name = "CRISP Controllers - Learning Systems Lab"
+site_name = "CRISP Controllers - Learning Systems and Robotics Lab"
 nav = [
     {"Home" = "index.md"},
     {"Design Philosophy"= "design_philosophy.md"},
