@@ -122,7 +122,7 @@ CartesianController::update(const rclcpp::Time &time,
   J.setZero();
   auto reference_frame = params_.use_local_jacobian
                              ? pinocchio::ReferenceFrame::LOCAL
-                             : pinocchio::ReferenceFrame::WORLD;
+                             : pinocchio::ReferenceFrame::LOCAL_WORLD_ALIGNED;
   pinocchio::computeFrameJacobian(model_, data_, q_pin, end_effector_frame_id,
                                   reference_frame, J);
 
