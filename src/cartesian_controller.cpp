@@ -151,19 +151,21 @@ CartesianController::update(const rclcpp::Time &time,
 
     pinocchio::computeMinverse(model_, data_, q_pin);
     auto Mx_inv = J * data_.Minv * J.transpose();
-    auto Mx = pseudo_inverse(Mx_inv);
+    auto Mx = pseudo_inverse(Mx_inv, params_.operational_space_regularization);
 
     tau_task << J.transpose() * Mx * (stiffness * error - damping * (J * dq));
   } else {
     tau_task << J.transpose() * (stiffness * error - damping * (J * dq));
   }
 
-  if (model_.nq != model_.nv) {
-    // TODO: Then we have some continouts joints, not being handled for now
+  if (model_.nq != model_.nv || !params_.joint_limit_repulsion.enabled) {
+    // Disabled or continuous joints not supported for joint limit repulsion
     tau_joint_limits = Eigen::VectorXd::Zero(model_.nv);
   } else {
-    tau_joint_limits = get_joint_limit_torque(q, model_.lowerPositionLimit,
-                                              model_.upperPositionLimit);
+    tau_joint_limits = get_joint_limit_torque(
+        q, model_.lowerPositionLimit, model_.upperPositionLimit,
+        params_.joint_limit_repulsion.safe_range,
+        params_.joint_limit_repulsion.max_torque);
   }
 
   tau_secondary << nullspace_stiffness * (q_ref - q) +
@@ -197,8 +199,8 @@ CartesianController::update(const rclcpp::Time &time,
   if (params_.limit_torques) {
     tau_d = saturateTorqueRate(tau_d, tau_previous, params_.max_delta_tau);
   }
-  /*tau_d = exponential_moving_average(tau_d, tau_previous,*/
-  /*                                   params_.filter.output_torque);*/
+  tau_d = exponential_moving_average(tau_d, tau_previous,
+                                     params_.filter.output_torque);
 
   if (not params_.stop_commands) {
     for (size_t i = 0; i < num_joints; ++i) {
