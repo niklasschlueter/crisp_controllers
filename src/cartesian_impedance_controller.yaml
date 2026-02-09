@@ -20,7 +20,7 @@ cartesian_impedance_controller:
   operational_space_regularization:
     type: double
     default_value: 0.1
-    description: "Regularization (damping) for Mx pseudo-inverse. Higher values improve stability near singularities but reduce accuracy. Try 0.01-0.5."
+    description: "Regularization (damping) for Mx pseudo-inverse. Higher values improve stability near singularities but reduce accuracy. Valid range is 0.001-1.0; typical useful values are in the 0.01-0.5 range."
     validation:
       bounds<>: [0.001, 1.0]
 
