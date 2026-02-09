@@ -159,7 +159,7 @@ CartesianController::update(const rclcpp::Time &time,
   }
 
   if (model_.nq != model_.nv || !params_.joint_limit_repulsion.enabled) {
-    // Disabled or continuous joints not supported for joint limit repulsion
+    // Skip joint limit repulsion if disabled or if continuous joints are present (nq != nv)
     tau_joint_limits = Eigen::VectorXd::Zero(model_.nv);
   } else {
     tau_joint_limits = get_joint_limit_torque(
