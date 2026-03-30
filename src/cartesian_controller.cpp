@@ -518,6 +518,16 @@ CartesianController::on_activate(const rclcpp_lifecycle::State & /*previous_stat
   desired_position_ = target_position_;
   desired_orientation_ = target_orientation_;
 
+  // Seed the output torque filter at the current gravity compensation value so
+  // the first update() output is already at steady-state rather than ramping
+  // up from zero. Without this, the arm drops during controller switches while
+  // the EMA filter converges from tau_previous = 0.
+  if (params_.use_gravity_compensation) {
+    tau_previous = pinocchio::computeGeneralizedGravity(model_, data_, q_pin);
+  } else {
+    tau_previous.setZero();
+  }
+
   RCLCPP_INFO(get_node()->get_logger(), "Controller activated.");
   return CallbackReturn::SUCCESS;
 }
