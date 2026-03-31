@@ -518,10 +518,10 @@ CartesianController::on_activate(const rclcpp_lifecycle::State & /*previous_stat
   desired_position_ = target_position_;
   desired_orientation_ = target_orientation_;
 
-  // Seed the output torque filter at the current gravity compensation value so
-  // the first update() output is already at steady-state rather than ramping
-  // up from zero. Without this, the arm drops during controller switches while
-  // the EMA filter converges from tau_previous = 0.
+  // Seed the output EMA filter so the first update() cycle starts from the
+  // correct torque rather than zero (or a stale value from a previous run).
+  // Without this, the filter ramps from tau_previous → steady-state over its
+  // time constant, leaving the arm undersupported during the switch window.
   if (params_.use_gravity_compensation) {
     tau_previous = pinocchio::computeGeneralizedGravity(model_, data_, q_pin);
   } else {
