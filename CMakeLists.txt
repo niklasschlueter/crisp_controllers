@@ -60,6 +60,7 @@ find_package(hardware_interface REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(pinocchio REQUIRED)
 find_package(realtime_tools REQUIRED)
+find_package(std_msgs REQUIRED)
 find_package(generate_parameter_library REQUIRED)
 
 generate_parameter_library(
@@ -82,10 +83,16 @@ generate_parameter_library(
   src/twist_broadcaster.yaml
 )
 
+generate_parameter_library(
+  cartesian_admittance_controller_parameters
+  src/cartesian_admittance_controller.yaml
+)
+
 add_library(
         ${PROJECT_NAME}
         SHARED
         src/cartesian_controller.cpp
+        src/cartesian_admittance_controller.cpp
         src/pose_broadcaster.cpp
         src/torque_feedback_controller.cpp
         src/twist_broadcaster.cpp
@@ -113,6 +120,7 @@ endif()
 target_link_libraries(${PROJECT_NAME}
   PRIVATE
     cartesian_controller_parameters
+    cartesian_admittance_controller_parameters
     pose_broadcaster_parameters
     torque_feedback_controller_parameters
     twist_broadcaster_parameters
@@ -129,6 +137,7 @@ ament_target_dependencies(${PROJECT_NAME}
     pinocchio
     generate_parameter_library
     realtime_tools
+    std_msgs
 )
 
 pluginlib_export_plugin_description_file(
@@ -156,6 +165,7 @@ ament_export_dependencies(
     Eigen3
     pinocchio
     realtime_tools
+    std_msgs
     generate_parameter_library
 )
 
