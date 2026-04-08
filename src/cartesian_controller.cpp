@@ -69,10 +69,23 @@ CartesianController::update(const rclcpp::Time & time, const rclcpp::Duration & 
   // Update current state information with EMA filtered values
   updateCurrentState();
 
-  // Check if new targets available
+  // Apply a new target pose if one arrived since the last cycle.
+  // parse_target_pose_() also runs the NaN and max-distance checks inside.
   if (new_target_pose_) {
     parse_target_pose_();
     new_target_pose_ = false;
+  }
+
+  // Timeout watchdog: if no pose has been received for too long, freeze the
+  // target at the current end-effector position. This prevents the controller
+  // from driving toward a stale goal when the sender crashes or the network drops.
+  if (params_.pose_safety.timeout.enabled) {
+    apply_pose_timeout(
+      time, last_pose_received_ns_,
+      params_.pose_safety.timeout.seconds,
+      end_effector_pose,
+      target_position_, target_orientation_,
+      get_node()->get_logger(), get_node()->get_clock());
   }
   if (new_target_joint_) {
     parse_target_joint_();
@@ -344,6 +357,8 @@ CartesianController::on_configure(const rclcpp_lifecycle::State & /*previous_sta
         "Ignoring target_pose message due to multiple publishers detected!");
       return;
     }
+    // Record reception time so the RT update() loop can check pose age.
+    last_pose_received_ns_.store(get_node()->now().nanoseconds(), std::memory_order_relaxed);
     target_pose_buffer_.writeFromNonRT(msg);
     new_target_pose_ = true;
   };
@@ -572,6 +587,10 @@ CartesianController::on_activate(const rclcpp_lifecycle::State & /*previous_stat
   desired_position_ = target_position_;
   desired_orientation_ = target_orientation_;
 
+  // Reset the pose reception timestamp so the timeout watchdog does not fire
+  // immediately after (re-)activation due to a stale value from a prior run.
+  last_pose_received_ns_.store(0, std::memory_order_relaxed);
+
   // Seed the output EMA filter so the first update() cycle starts from the
   // correct torque rather than zero (or a stale value from a previous run).
   // Without this, the filter ramps from tau_previous → steady-state over its
@@ -591,14 +610,26 @@ CartesianController::on_deactivate(const rclcpp_lifecycle::State & /*previous_st
   return CallbackReturn::SUCCESS;
 }
 
-void CartesianController::parse_target_pose_() {
+bool CartesianController::parse_target_pose_() {
   auto msg = *target_pose_buffer_.readFromRT();
+
+  // Run NaN/Inf and max-distance safety checks (logic lives in utils/pose_safety.hpp).
+  if (!validate_pose(*msg, end_effector_pose,
+        params_.pose_safety.nan_check.enabled,
+        params_.pose_safety.max_distance.enabled,
+        params_.pose_safety.max_distance.meters,
+        get_node()->get_logger(), get_node()->get_clock())) {
+    return false;
+  }
+
+  // All checks passed — apply the target pose.
   target_position_ << msg->pose.position.x, msg->pose.position.y, msg->pose.position.z;
   target_orientation_ = Eigen::Quaterniond(
     msg->pose.orientation.w,
     msg->pose.orientation.x,
     msg->pose.orientation.y,
     msg->pose.orientation.z);
+  return true;
 }
 
 void CartesianController::parse_target_joint_() {

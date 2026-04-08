@@ -266,6 +266,47 @@ cartesian_admittance_controller:
     default_value: true
     description: "Limit\\clamp the error computed as the difference between the current pose and target pose."
 
+  pose_safety:
+    # ── Timeout / watchdog ──────────────────────────────────────────────────
+    # If no target pose is received for longer than `timeout.seconds`, the
+    # controller freezes the target at the current end-effector position so
+    # the robot holds still instead of driving toward a stale goal.
+    timeout:
+      enabled:
+        type: bool
+        default_value: true
+        description: "If true, reset the target pose to the current end-effector position when no valid pose has been received for longer than `pose_safety.timeout.seconds`."
+      seconds:
+        type: double
+        default_value: 0.5
+        description: "Maximum allowed time (s) since the last received target pose. If exceeded, the target freezes at the current end-effector position."
+        validation:
+          bounds<>: [0.0, 60.0]
+
+    # ── NaN / Inf guard ─────────────────────────────────────────────────────
+    # Malformed values from a buggy publisher would corrupt the control
+    # computation — this guard discards such messages before they are applied.
+    nan_check:
+      enabled:
+        type: bool
+        default_value: true
+        description: "If true, reject any target pose message that contains NaN or infinite values in position or orientation."
+
+    # ── Maximum distance guard ───────────────────────────────────────────────
+    # Prevents large instantaneous jumps in the commanded target position
+    # (e.g. from a re-started or mis-configured publisher).
+    max_distance:
+      enabled:
+        type: bool
+        default_value: false
+        description: "If true, reject target poses whose Euclidean distance from the current end-effector position exceeds `pose_safety.max_distance.meters`."
+      meters:
+        type: double
+        default_value: 1.0
+        description: "Maximum allowed distance (m) between the incoming target position and the current end-effector position."
+        validation:
+          bounds<>: [0.0, 10.0]
+
   limit_torques:
     type: bool
     default_value: true

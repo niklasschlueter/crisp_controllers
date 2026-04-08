@@ -33,8 +33,10 @@
 #include <cartesian_admittance_controller_parameters.hpp>
 #endif
 
+#include <atomic>
 #include <sensor_msgs/msg/joint_state.hpp>
 #include "realtime_tools/realtime_buffer.hpp"
+#include <crisp_controllers/utils/pose_safety.hpp>
 
 using CallbackReturn = rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
 
@@ -143,9 +145,11 @@ private:
   void updateCurrentState(bool initialize = false);
 
   /**
-   * @brief Reads the target pose in realtime loop from the buffer and parses it
+   * @brief Reads the target pose in realtime loop from the buffer and parses it.
+   * Runs the NaN and max-distance safety checks (see utils/pose_safety.hpp).
+   * @return true if the pose was valid and applied, false if it was rejected.
    */
-  void parse_target_pose_();
+  bool parse_target_pose_();
 
   /**
    * @brief Reads the target joint in realtime loop from the buffer and parses it
@@ -180,6 +184,11 @@ private:
   bool use_topic_stiffness_ = false;
   bool new_ft_sensor_ = false;
   bool new_target_adm_stiffness_ = false;
+
+  /** @brief Reception time (nanoseconds) of the last target_pose callback.
+   *  Written from the subscriber thread; read in the RT update() thread.
+   *  Zero means no pose has been received yet. */
+  std::atomic<int64_t> last_pose_received_ns_{0};
   bool use_topic_adm_stiffness_ = false;
 
   // ---- Realtime buffers (same as CartesianController) ----
