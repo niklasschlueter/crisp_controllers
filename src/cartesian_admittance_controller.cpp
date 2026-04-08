@@ -268,7 +268,7 @@ CartesianAdmittanceController::update(const rclcpp::Time & time, const rclcpp::D
   if (params_.limit_torques) {
     tau_d = saturateTorqueRate(tau_d, tau_previous, params_.max_delta_tau);
   }
-  tau_d = exponential_moving_average(tau_d, tau_previous, params_.filter.output_torque);
+  tau_d = exponential_moving_average(tau_previous, tau_d, params_.filter.output_torque);
 
   // 17. Command interfaces
   if (!params_.stop_commands) {

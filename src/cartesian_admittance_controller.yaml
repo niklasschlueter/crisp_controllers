@@ -232,32 +232,32 @@ cartesian_admittance_controller:
     target_pose:
       type: double
       default_value: 0.1
-      description: "Amount of smoothing for the target pose when using the EMA. The EMA is applied at each step"
+      description: "EMA smoothing factor for the target pose (position and orientation). 0=no filtering, 1=never updates."
       validation:
-        bounds<>: [0.1, 1.0]
+        bounds<>: [0.0, 1.0]
     q:
       type: double
       default_value: 0.5
-      description: "Amount of smoothing for the target pose when using the EMA."
+      description: "EMA smoothing factor for measured joint positions. 0=no filtering, 1=never updates."
       validation:
         bounds<>: [0.0, 1.0]
     dq:
       type: double
       default_value: 0.5
-      description: "Amount of smoothing for the target pose when using the EMA."
+      description: "EMA smoothing factor for measured joint velocities. 0=no filtering, 1=never updates."
       validation:
         bounds<>: [0.0, 1.0]
     q_ref:
       type: double
       default_value: 0.5
-      description: "Amount of smoothing for the target pose when using the EMA."
+      description: "EMA smoothing factor for the reference joint position (nullspace target). 0=no filtering, 1=never updates."
       validation:
         bounds<>: [0.0, 1.0]
 
     output_torque:
       type: double
       default_value: 0.5
-      description: "Amount of smoothing for the output torque when using the EMA."
+      description: "EMA smoothing factor for the output torque. 0=no filtering, 1=never updates."
       validation:
         bounds<>: [0.0, 1.0]
 
