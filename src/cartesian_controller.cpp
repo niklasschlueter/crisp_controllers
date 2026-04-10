@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <limits>
 
 #include <Eigen/src/Core/Matrix.h>  // NOLINT(build/include_order)
 #include <fmt/format.h>
@@ -101,6 +102,26 @@ CartesianController::update(const rclcpp::Time & time, const rclcpp::Duration & 
     setStiffnessAndDamping();
   }
 
+  // Velocity feedforward (PD+): consume the latest twist and apply a watchdog.
+  // When disabled or stale, dx_d_ stays zero and the torque law below collapses
+  // to the standard impedance form.
+  if (params_.feedforward.velocity.enabled) {
+    if (new_target_twist_) {
+      parse_target_twist_();
+      new_target_twist_ = false;
+    }
+    const int64_t now_ns  = time.nanoseconds();
+    const int64_t last_ns = last_twist_received_ns_.load(std::memory_order_relaxed);
+    const double age_s = (last_ns == 0)
+      ? std::numeric_limits<double>::infinity()
+      : (now_ns - last_ns) * 1e-9;
+    dx_d_ = (age_s > params_.feedforward.velocity.timeout_seconds)
+      ? Eigen::Matrix<double, 6, 1>::Zero()
+      : target_twist_;
+  } else {
+    dx_d_.setZero();
+  }
+
   pinocchio::forwardKinematics(model_, data_, q_pin, dq);
   pinocchio::updateFramePlacements(model_, data_);
 
@@ -161,10 +182,14 @@ CartesianController::update(const rclcpp::Time & time, const rclcpp::Duration & 
     return controller_interface::return_type::ERROR;
   }
 
+  // PD+ form: damp the velocity error (J*dq - dx_d_), not the velocity itself.
+  // dx_d_ is zero when feedforward is disabled or stale, so this collapses to
+  // the standard impedance law in that case.
+  const Eigen::Matrix<double, 6, 1> dx_err = J * dq - dx_d_;
   if (params_.use_operational_space) {
-    tau_task << J.transpose() * Mx * (stiffness * error - damping * (J * dq));
+    tau_task << J.transpose() * Mx * (stiffness * error - damping * dx_err);
   } else {
-    tau_task << J.transpose() * (stiffness * error - damping * (J * dq));
+    tau_task << J.transpose() * (stiffness * error - damping * dx_err);
   }
 
   if (model_.nq != model_.nv) {
@@ -342,6 +367,7 @@ CartesianController::on_configure(const rclcpp_lifecycle::State & /*previous_sta
   new_target_joint_ = false;
   new_target_wrench_ = false;
   new_target_stiffness_ = false;
+  new_target_twist_ = false;
   use_topic_stiffness_ = false;
 
   multiple_publishers_detected_ = false;
@@ -399,6 +425,48 @@ CartesianController::on_configure(const rclcpp_lifecycle::State & /*previous_sta
 
   wrench_sub_ = get_node()->create_subscription<geometry_msgs::msg::WrenchStamped>(
     "target_wrench", rclcpp::QoS(1), target_wrench_callback);
+
+  // Velocity feedforward subscriber (only created if enabled — no cost when off).
+  // The publisher is trusted to send the twist in the same frame as the Jacobian
+  // (see use_local_jacobian); no frame conversion is performed in the controller.
+  if (params_.feedforward.velocity.enabled) {
+    auto target_twist_callback =
+      [this](const std::shared_ptr<geometry_msgs::msg::TwistStamped> msg) -> void {
+      if (!check_topic_publisher_count(params_.feedforward.velocity.topic)) {
+        RCLCPP_WARN_THROTTLE(
+          get_node()->get_logger(),
+          *get_node()->get_clock(),
+          1000,
+          "Ignoring target_twist message due to multiple publishers detected!");
+        return;
+      }
+      // Reject malformed messages before they can corrupt the control loop.
+      if (params_.feedforward.velocity.nan_check) {
+        const auto & l = msg->twist.linear;
+        const auto & a = msg->twist.angular;
+        if (!std::isfinite(l.x) || !std::isfinite(l.y) || !std::isfinite(l.z) ||
+            !std::isfinite(a.x) || !std::isfinite(a.y) || !std::isfinite(a.z)) {
+          RCLCPP_WARN_THROTTLE(
+            get_node()->get_logger(),
+            *get_node()->get_clock(),
+            1000,
+            "Rejecting target_twist with non-finite values.");
+          return;
+        }
+      }
+      last_twist_received_ns_.store(get_node()->now().nanoseconds(), std::memory_order_relaxed);
+      target_twist_buffer_.writeFromNonRT(msg);
+      new_target_twist_ = true;
+    };
+
+    twist_sub_ = get_node()->create_subscription<geometry_msgs::msg::TwistStamped>(
+      params_.feedforward.velocity.topic, rclcpp::QoS(1), target_twist_callback);
+
+    RCLCPP_INFO(
+      get_node()->get_logger(),
+      "Velocity feedforward enabled, subscribing to: %s",
+      params_.feedforward.velocity.topic.c_str());
+  }
 
   auto target_stiffness_callback =
     [this](const std::shared_ptr<std_msgs::msg::Float64MultiArray> msg) -> void {
@@ -591,6 +659,11 @@ CartesianController::on_activate(const rclcpp_lifecycle::State & /*previous_stat
   // immediately after (re-)activation due to a stale value from a prior run.
   last_pose_received_ns_.store(0, std::memory_order_relaxed);
 
+  // Same for the twist watchdog and feedforward state — start clean.
+  last_twist_received_ns_.store(0, std::memory_order_relaxed);
+  target_twist_.setZero();
+  dx_d_.setZero();
+
   // Seed the output EMA filter so the first update() cycle starts from the
   // correct torque rather than zero (or a stale value from a previous run).
   // Without this, the filter ramps from tau_previous → steady-state over its
@@ -652,6 +725,14 @@ void CartesianController::parse_target_wrench_() {
   auto msg = *target_wrench_buffer_.readFromRT();
   target_wrench_ << msg->wrench.force.x, msg->wrench.force.y, msg->wrench.force.z,
     msg->wrench.torque.x, msg->wrench.torque.y, msg->wrench.torque.z;
+}
+
+bool CartesianController::parse_target_twist_() {
+  auto msg = *target_twist_buffer_.readFromRT();
+  if (!msg) return false;
+  target_twist_ << msg->twist.linear.x,  msg->twist.linear.y,  msg->twist.linear.z,
+                   msg->twist.angular.x, msg->twist.angular.y, msg->twist.angular.z;
+  return true;
 }
 
 void CartesianController::parse_target_stiffness_() {

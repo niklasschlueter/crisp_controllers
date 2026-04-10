@@ -13,6 +13,7 @@
 
 #include <controller_interface/controller_interface.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <geometry_msgs/msg/twist_stamped.hpp>
 #include <geometry_msgs/msg/wrench_stamped.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>
 #include <pinocchio/algorithm/kinematics.hpp>
@@ -107,6 +108,8 @@ private:
   rclcpp::Subscription<geometry_msgs::msg::WrenchStamped>::SharedPtr wrench_sub_;
   /** @brief Subscription for variable stiffness messages */
   rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr stiffness_sub_;
+  /** @brief Subscription for target twist messages (velocity feedforward, optional) */
+  rclcpp::Subscription<geometry_msgs::msg::TwistStamped>::SharedPtr twist_sub_;
 
   /** @brief Flag to indicate if multiple publishers detected */
   bool multiple_publishers_detected_;
@@ -147,16 +150,28 @@ private:
    */
   void parse_target_stiffness_();
 
+  /**
+   * @brief Reads the target twist in realtime loop from the buffer and parses it.
+   * Used as the desired Cartesian velocity for the PD+ feedforward term.
+   */
+  bool parse_target_twist_();
+
   bool new_target_pose_;
   bool new_target_joint_;
   bool new_target_wrench_;
   bool new_target_stiffness_ = false;
+  bool new_target_twist_ = false;
   bool use_topic_stiffness_ = false;
 
   /** @brief Reception time (nanoseconds) of the last target_pose callback.
    *  Written from the subscriber thread; read in the RT update() thread.
    *  Zero means no pose has been received yet. */
   std::atomic<int64_t> last_pose_received_ns_{0};
+
+  /** @brief Reception time (nanoseconds) of the last target_twist callback.
+   *  Same semantics as last_pose_received_ns_. Used by the feedforward
+   *  watchdog to fall back to dx_d=0 when the twist stream goes stale. */
+  std::atomic<int64_t> last_twist_received_ns_{0};
 
   realtime_tools::RealtimeBuffer<std::shared_ptr<geometry_msgs::msg::PoseStamped>>
     target_pose_buffer_;
@@ -170,6 +185,9 @@ private:
   realtime_tools::RealtimeBuffer<std::shared_ptr<std_msgs::msg::Float64MultiArray>>
     target_stiffness_buffer_;
 
+  realtime_tools::RealtimeBuffer<std::shared_ptr<geometry_msgs::msg::TwistStamped>>
+    target_twist_buffer_;
+
   /** @brief Target position in Cartesian space */
   Eigen::Vector3d target_position_;
   /** @brief Target orientation as quaternion */
@@ -180,6 +198,11 @@ private:
   Eigen::Vector3d desired_position_;
   /** @brief Desired target orientation as quaternion after applying filtering */
   Eigen::Quaterniond desired_orientation_;
+  /** @brief Last received target twist (linear, angular). Frame must match the Jacobian. */
+  Eigen::Matrix<double, 6, 1> target_twist_ = Eigen::Matrix<double, 6, 1>::Zero();
+  /** @brief Cartesian velocity feedforward used in the damping term.
+   *  Equals target_twist_ when feedforward is enabled and fresh, zero otherwise. */
+  Eigen::Matrix<double, 6, 1> dx_d_ = Eigen::Matrix<double, 6, 1>::Zero();
 
   /** @brief Parameter listener for dynamic parameter updates */
   std::shared_ptr<cartesian_controller::ParamListener> params_listener_;

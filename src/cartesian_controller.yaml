@@ -266,6 +266,32 @@ cartesian_controller:
     default_value: true
     description: "Limit\\clamp the error computed as the difference between the current pose and target pose."
 
+  feedforward:
+    # Cartesian velocity feedforward (PD+ control). When enabled, the damping
+    # term acts on the velocity error (J*dq - dx_d) instead of the velocity
+    # (J*dq), so the controller no longer fights its own tracking on a moving
+    # setpoint. References: Paden & Panja (1988), "Globally asymptotically
+    # stable PD+ controller for robot manipulators", Int. J. Control 47(6).
+    velocity:
+      enabled:
+        type: bool
+        default_value: false
+        description: "Enable Cartesian velocity feedforward (PD+). Subscribes to a TwistStamped on `feedforward.velocity.topic` and uses it as dx_d in the damping term. Default off — when off, behavior is identical to standard impedance control."
+      topic:
+        type: string
+        default_value: "target_twist"
+        description: "Topic for the desired Cartesian velocity (geometry_msgs/TwistStamped). The twist MUST be expressed in the same frame as the Jacobian: LOCAL (EE frame) when use_local_jacobian=true, LOCAL_WORLD_ALIGNED (axes in world orientation, applied at the EE point) when use_local_jacobian=false. The publisher is trusted — no frame conversion is performed."
+      timeout_seconds:
+        type: double
+        default_value: 0.5
+        description: "If no twist message arrives within this window, dx_d decays to zero (graceful fallback to plain damping). Mirrors pose_safety.timeout."
+        validation:
+          bounds<>: [0.0, 60.0]
+      nan_check:
+        type: bool
+        default_value: true
+        description: "Reject incoming twist messages containing NaN or infinite values."
+
   pose_safety:
     # ── Timeout / watchdog ──────────────────────────────────────────────────
     # If no target pose is received for longer than `timeout.seconds`, the
