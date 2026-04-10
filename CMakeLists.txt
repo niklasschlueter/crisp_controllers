@@ -203,6 +203,16 @@ if(BUILD_TESTING)
   target_link_libraries(test_pseudo_inverse
     Eigen3::Eigen
   )
+
+  ament_add_gtest(test_friction_model
+    tests/test_friction_model.cpp
+  )
+  target_include_directories(test_friction_model PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  )
+  target_link_libraries(test_friction_model
+    Eigen3::Eigen
+  )
 endif()
 
 ament_package()

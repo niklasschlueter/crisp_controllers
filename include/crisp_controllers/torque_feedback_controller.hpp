@@ -18,6 +18,7 @@
 #include <pinocchio/multibody/data.hpp>
 #include <pinocchio/multibody/model.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
+#include <crisp_controllers/utils/friction_model.hpp>
 
 using CallbackReturn = rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
 
@@ -154,10 +155,15 @@ private:
   /// Nullspace weights (computed from parameters)
   Eigen::VectorXd nullspace_weights_;
 
-  /// Friction parameters as Eigen vectors
+  /// Friction parameters as Eigen vectors (sigmoidal model)
   Eigen::VectorXd friction_fp1_;
   Eigen::VectorXd friction_fp2_;
   Eigen::VectorXd friction_fp3_;
+
+  /// Active friction model type, resolved in on_init()
+  FrictionModelType friction_model_type_ = FrictionModelType::kSignoidal;
+  /// Sigmoidal+viscous friction parameters
+  Eigen::VectorXd friction_f_v_, friction_f_o_, friction_f_c_, friction_alpha_, friction_ni_;
 
   /// Nullspace projection matrix
   Eigen::MatrixXd nullspace_projection_;

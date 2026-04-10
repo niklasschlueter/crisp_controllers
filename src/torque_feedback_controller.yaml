@@ -74,16 +74,54 @@ torque_feedback_controller:
         one_of<>: [["kinematic", "dynamic", "none"]]
 
   friction:
+    model_type:
+      type: string
+      default_value: "sigmoidal"
+      description: >
+        Friction model type.
+        'sigmoidal': 3-param model f(dq)=fp1/(1+exp(-fp2*(dq+fp3)))-fp1/(1+exp(-fp2*fp3))
+        from Cognetti, FrankaEmikaPandaDynModel.
+        'sigmoidal_viscous': 5-param model f(dq)=f_v*dq+f_o+f_c/(1+exp(-alpha*(dq+ni)))
+        from Petrone et al., arXiv:2502.11940, IEEE Trans. Ind. Informatics 2025.
+      validation:
+        one_of<>: [["sigmoidal", "sigmoidal_viscous"]]
+    # --- 3-param sigmoidal model (Franka default) ---
     fp1:
       type: double_array
       default_value: [0.54615, 0.87224, 0.64068, 1.2794, 0.83904, 0.30301, 0.56489]
-      description: "Friction parameters part 1"
+      description: "Sigmoidal model: amplitude per joint. Default: Franka Emika Panda (7 joints)."
     fp2:
       type: double_array
       default_value: [5.1181, 9.0657, 10.136, 5.5903, 8.3469, 17.133, 10.336]
-      description: "Friction parameters part 2"
+      description: "Sigmoidal model: steepness per joint. Default: Franka Emika Panda (7 joints)."
     fp3:
       type: double_array
       default_value: [0.039533, 0.025882, -0.04607, 0.036194, 0.026226, -0.021047, 0.0035526]
-      description: "Friction parameters part 3"
+      description: "Sigmoidal model: velocity shift per joint. Default: Franka Emika Panda (7 joints)."
+    # --- 5-param sigmoidal+viscous model ---
+    # Reference: Petrone, Ferrentino, Chiacchio, "The Dynamic Model of the UR10 Robot
+    # and its ROS2 Integration", arXiv:2502.11940, IEEE Trans. Ind. Informatics, 2025.
+    # Code: https://github.com/unisa-acg/inverse-dynamics-solver
+    # NOTE: Published values are for the UR10 CB3. For UR10e, these should be re-identified.
+    # Values must be in torque domain (multiply current-domain params by motor gain K_i).
+    f_v:
+      type: double_array
+      default_value: []
+      description: "Sigmoidal+viscous model: viscous friction coefficient per joint [Nm*s/rad]."
+    f_o:
+      type: double_array
+      default_value: []
+      description: "Sigmoidal+viscous model: friction offset per joint [Nm]."
+    f_c:
+      type: double_array
+      default_value: []
+      description: "Sigmoidal+viscous model: Coulomb friction amplitude per joint [Nm]."
+    alpha:
+      type: double_array
+      default_value: []
+      description: "Sigmoidal+viscous model: sigmoid steepness per joint [s/rad]."
+    ni:
+      type: double_array
+      default_value: []
+      description: "Sigmoidal+viscous model: velocity shift per joint [rad/s]."
 

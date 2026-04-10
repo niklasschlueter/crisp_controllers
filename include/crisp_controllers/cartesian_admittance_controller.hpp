@@ -36,6 +36,7 @@
 #include <atomic>
 #include <sensor_msgs/msg/joint_state.hpp>
 #include "realtime_tools/realtime_buffer.hpp"
+#include <crisp_controllers/utils/friction_model.hpp>
 #include <crisp_controllers/utils/pose_safety.hpp>
 
 using CallbackReturn = rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
@@ -300,12 +301,17 @@ private:
   /** @brief Joint-space identity matrix */
   Eigen::MatrixXd Id_nv;
 
-  /** @brief Friction parameters 1 of size nv */
+  /** @brief Friction parameters 1 of size nv (sigmoidal model) */
   Eigen::VectorXd fp1;
-  /** @brief Friction parameters 2 of size nv */
+  /** @brief Friction parameters 2 of size nv (sigmoidal model) */
   Eigen::VectorXd fp2;
-  /** @brief Friction parameters 3 of size nv */
+  /** @brief Friction parameters 3 of size nv (sigmoidal model) */
   Eigen::VectorXd fp3;
+
+  /** @brief Active friction model type, resolved in on_configure() */
+  FrictionModelType friction_model_type_ = FrictionModelType::kSignoidal;
+  /** @brief Sigmoidal+viscous friction parameters of size nv */
+  Eigen::VectorXd friction_f_v, friction_f_o, friction_f_c, friction_alpha, friction_ni;
 
   /** @brief Allowed type of joints */
   const std::unordered_set<std::basic_string<char>> allowed_joint_types = {
