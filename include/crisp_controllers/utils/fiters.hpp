@@ -4,7 +4,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include <eigen3/Eigen/Dense>  // NOLINT(build/include_order)
+#include <Eigen/Dense>  // NOLINT(build/include_order)
 
 /**
   * @brief Compute the exponential moving average of a value

@@ -211,15 +211,7 @@ CartesianController::update(const rclcpp::Time & time, const rclcpp::Duration & 
     tau_nullspace.cwiseMin(params_.nullspace.max_tau).cwiseMax(-params_.nullspace.max_tau);
 
   if (params_.use_friction) {
-    switch (friction_model_type_) {
-      case FrictionModelType::kSignoidal:
-        tau_friction = get_friction(dq, fp1, fp2, fp3);
-        break;
-      case FrictionModelType::kSigmoidalViscous:
-        tau_friction = get_friction_sigmoidal_viscous(
-          dq, friction_f_v, friction_f_o, friction_f_c, friction_alpha, friction_ni);
-        break;
-    }
+    compute_friction(friction_state_, dq, tau_friction);
   } else {
     tau_friction.setZero();
   }
@@ -364,37 +356,18 @@ CartesianController::on_configure(const rclcpp_lifecycle::State & /*previous_sta
   J_pinv = Eigen::MatrixXd::Zero(model_.nv, 6);
   Id_nv = Eigen::MatrixXd::Identity(model_.nv, model_.nv);
 
-  // Load friction model parameters based on selected model type
-  if (params_.friction.model_type == "sigmoidal_viscous") {
-    friction_model_type_ = FrictionModelType::kSigmoidalViscous;
-    if (params_.friction.f_v.empty() || params_.friction.f_o.empty() ||
-        params_.friction.f_c.empty() || params_.friction.alpha.empty() ||
-        params_.friction.ni.empty()) {
+  // Load friction model — validates and populates friction_state_.
+  // Hard-error on failure: NaN at 500 Hz on the real arm is unsafe.
+  {
+    std::string err;
+    if (!load_friction_state(params_.friction, model_.nv, friction_state_, err)) {
       RCLCPP_ERROR(get_node()->get_logger(),
-        "sigmoidal_viscous friction model requires f_v, f_o, f_c, alpha, ni arrays.");
+                   "Friction config invalid: %s", err.c_str());
       return CallbackReturn::ERROR;
     }
-    if (static_cast<int>(params_.friction.f_v.size()) < model_.nv ||
-        static_cast<int>(params_.friction.f_o.size()) < model_.nv ||
-        static_cast<int>(params_.friction.f_c.size()) < model_.nv ||
-        static_cast<int>(params_.friction.alpha.size()) < model_.nv ||
-        static_cast<int>(params_.friction.ni.size()) < model_.nv) {
-      RCLCPP_ERROR(get_node()->get_logger(),
-        "sigmoidal_viscous friction arrays must have size >= %d (nv)", model_.nv);
-      return CallbackReturn::ERROR;
-    }
-    friction_f_v = Eigen::Map<Eigen::VectorXd>(params_.friction.f_v.data(), model_.nv);
-    friction_f_o = Eigen::Map<Eigen::VectorXd>(params_.friction.f_o.data(), model_.nv);
-    friction_f_c = Eigen::Map<Eigen::VectorXd>(params_.friction.f_c.data(), model_.nv);
-    friction_alpha = Eigen::Map<Eigen::VectorXd>(params_.friction.alpha.data(), model_.nv);
-    friction_ni = Eigen::Map<Eigen::VectorXd>(params_.friction.ni.data(), model_.nv);
-    RCLCPP_INFO(get_node()->get_logger(), "Using sigmoidal_viscous friction model (5-param).");
-  } else {
-    friction_model_type_ = FrictionModelType::kSignoidal;
-    fp1 = Eigen::Map<Eigen::VectorXd>(params_.friction.fp1.data(), model_.nv);
-    fp2 = Eigen::Map<Eigen::VectorXd>(params_.friction.fp2.data(), model_.nv);
-    fp3 = Eigen::Map<Eigen::VectorXd>(params_.friction.fp3.data(), model_.nv);
-    RCLCPP_INFO(get_node()->get_logger(), "Using sigmoidal friction model (3-param).");
+    RCLCPP_INFO(get_node()->get_logger(),
+                "Friction model: %s (%d joints).",
+                params_.friction.model_type.c_str(), model_.nv);
   }
 
   nullspace_stiffness = Eigen::MatrixXd::Zero(model_.nv, model_.nv);

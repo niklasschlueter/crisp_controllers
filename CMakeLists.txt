@@ -36,6 +36,11 @@ target_compile_options(project_compile_options INTERFACE
   # Warnings (build only)
   $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
 
+  # Promote missed-switch-case to a hard error. We rely on the compiler to
+  # catch any unhandled FrictionModelType (or other enum) value across the
+  # codebase — any new variant must be wired through every switch.
+  $<$<CXX_COMPILER_ID:GNU,Clang>:-Werror=switch>
+
   # Debug
   $<$<AND:$<CONFIG:Debug>,$<CXX_COMPILER_ID:GNU,Clang>>:-O0 -g>
 
@@ -200,7 +205,7 @@ if(BUILD_TESTING)
   target_include_directories(test_filters PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   )
-  target_link_libraries(test_pseudo_inverse
+  target_link_libraries(test_filters
     Eigen3::Eigen
   )
 

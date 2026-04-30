@@ -376,8 +376,11 @@ cartesian_controller:
         from Cognetti, FrankaEmikaPandaDynModel.
         'sigmoidal_viscous': 5-param model f(dq)=f_v*dq+f_o+f_c/(1+exp(-alpha*(dq+ni)))
         from Petrone et al., arXiv:2502.11940, IEEE Trans. Ind. Informatics 2025.
+        'stribeck': 4-param model f(dq)=tanh(k*dq)*(f_c+(f_s-f_c)*exp(-(dq/v_s)^2))
+        +f_v*dq. Captures the breakaway peak (f_s) above the kinetic Coulomb (f_c)
+        with viscous f_v and Stribeck width v_s. Per-joint smoothing sharpness k.
       validation:
-        one_of<>: [["sigmoidal", "sigmoidal_viscous"]]
+        one_of<>: [["sigmoidal", "sigmoidal_viscous", "stribeck"]]
     # --- 3-param sigmoidal model (Franka default) ---
     fp1:
       type: double_array
@@ -417,6 +420,33 @@ cartesian_controller:
       type: double_array
       default_value: []
       description: "Sigmoidal+viscous model: velocity shift per joint [rad/s]."
+    # --- 4-param Stribeck model (chatter-free via per-joint tanh smoothing) ---
+    # f(dq) = tanh(k*dq) * (f_c + (f_s - f_c) * exp(-(dq/v_s)^2)) + f_v * dq
+    # Identify on a slow constant-velocity sweep (ddq ~ 0, gravity-subtracted).
+    stribeck:
+      f_c:
+        type: double_array
+        default_value: []
+        description: "Stribeck: kinetic Coulomb friction per joint [Nm]."
+      f_s:
+        type: double_array
+        default_value: []
+        description: "Stribeck: breakaway / static-friction asymptote per joint [Nm]. f_s >= f_c."
+      v_s:
+        type: double_array
+        default_value: []
+        description: "Stribeck: characteristic Stribeck velocity per joint [rad/s]. Must be > 0."
+      f_v:
+        type: double_array
+        default_value: []
+        description: "Stribeck: viscous coefficient per joint [Nm*s/rad]."
+      k:
+        type: double_array
+        default_value: []
+        description: >
+          Stribeck: tanh sign-smoothing sharpness per joint [1/(rad/s)].
+          Leave empty to default to k_j = 5/v_s_j (smoothing band 1/k_j is 1/5
+          of the Stribeck width v_s_j, so the dip is preserved).
 
   variable_max_stiffness:
     translational:

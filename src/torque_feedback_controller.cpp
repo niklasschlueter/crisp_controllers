@@ -114,19 +114,13 @@ controller_interface::return_type TorqueFeedbackController::update(
   }
 
   auto tau_d = -params_.k_fb * tau_ext_thresholded - params_.kd * dq_;
-  Eigen::VectorXd tau_f;
-  switch (friction_model_type_) {
-    case FrictionModelType::kSignoidal:
-      tau_f = get_friction(dq_, friction_fp1_, friction_fp2_, friction_fp3_);
-      break;
-    case FrictionModelType::kSigmoidalViscous:
-      tau_f = get_friction_sigmoidal_viscous(
-        dq_, friction_f_v_, friction_f_o_, friction_f_c_, friction_alpha_, friction_ni_);
-      break;
-  }
+  // Friction feedforward (always applied — no use_friction gate, matches
+  // historic behavior of this low-level torque-feedback controller).
+  // tau_friction_ is a preallocated member to keep this loop alloc-free.
+  compute_friction(friction_state_, dq_, tau_friction_);
 
   // Save commanded torques for wrench computation
-  tau_commanded_ = tau_d + tau_f + tau_nullspace;
+  tau_commanded_ = tau_d + tau_friction_ + tau_nullspace;
 
   for (int i = 0; i < num_joints_; i++) {
 #if ROS2_VERSION_ABOVE_HUMBLE
@@ -161,6 +155,7 @@ CallbackReturn TorqueFeedbackController::on_init() {
   q_ = Eigen::VectorXd::Zero(num_joints_);
   dq_ = Eigen::VectorXd::Zero(num_joints_);
   tau_commanded_ = Eigen::VectorXd::Zero(num_joints_);
+  tau_friction_ = Eigen::VectorXd::Zero(num_joints_);
   q_init_ = Eigen::VectorXd::Zero(num_joints_);
 
   tau_ext_ = Eigen::VectorXd::Zero(num_joints_);
@@ -170,41 +165,20 @@ CallbackReturn TorqueFeedbackController::on_init() {
     nullspace_weights_[i] = params_.nullspace.weights.joints_map.at(joint_names_[i]).value;
   }
 
-  // Load friction model parameters based on selected model type
-  if (params_.friction.model_type == "sigmoidal_viscous") {
-    friction_model_type_ = FrictionModelType::kSigmoidalViscous;
-    if (params_.friction.f_v.empty() || params_.friction.f_o.empty() ||
-        params_.friction.f_c.empty() || params_.friction.alpha.empty() ||
-        params_.friction.ni.empty()) {
+  // Load friction model — validates and populates friction_state_.
+  // Hard-error on failure: the RT loop has no NaN guard.
+  {
+    std::string err;
+    if (!load_friction_state(params_.friction,
+                             static_cast<int>(num_joints_),
+                             friction_state_, err)) {
       RCLCPP_ERROR(get_node()->get_logger(),
-        "sigmoidal_viscous friction model requires f_v, f_o, f_c, alpha, ni arrays.");
+                   "Friction config invalid: %s", err.c_str());
       return CallbackReturn::ERROR;
     }
-    auto nj = static_cast<int>(num_joints_);
-    if (static_cast<int>(params_.friction.f_v.size()) < nj ||
-        static_cast<int>(params_.friction.f_o.size()) < nj ||
-        static_cast<int>(params_.friction.f_c.size()) < nj ||
-        static_cast<int>(params_.friction.alpha.size()) < nj ||
-        static_cast<int>(params_.friction.ni.size()) < nj) {
-      RCLCPP_ERROR(get_node()->get_logger(),
-        "sigmoidal_viscous friction arrays must have size >= %d (num_joints)", nj);
-      return CallbackReturn::ERROR;
-    }
-    friction_f_v_ = Eigen::Map<const Eigen::VectorXd>(params_.friction.f_v.data(), nj);
-    friction_f_o_ = Eigen::Map<const Eigen::VectorXd>(params_.friction.f_o.data(), nj);
-    friction_f_c_ = Eigen::Map<const Eigen::VectorXd>(params_.friction.f_c.data(), nj);
-    friction_alpha_ = Eigen::Map<const Eigen::VectorXd>(params_.friction.alpha.data(), nj);
-    friction_ni_ = Eigen::Map<const Eigen::VectorXd>(params_.friction.ni.data(), nj);
-    RCLCPP_INFO(get_node()->get_logger(), "Using sigmoidal_viscous friction model (5-param).");
-  } else {
-    friction_model_type_ = FrictionModelType::kSignoidal;
-    friction_fp1_ =
-      Eigen::Map<const Eigen::VectorXd>(params_.friction.fp1.data(), params_.friction.fp1.size());
-    friction_fp2_ =
-      Eigen::Map<const Eigen::VectorXd>(params_.friction.fp2.data(), params_.friction.fp2.size());
-    friction_fp3_ =
-      Eigen::Map<const Eigen::VectorXd>(params_.friction.fp3.data(), params_.friction.fp3.size());
-    RCLCPP_INFO(get_node()->get_logger(), "Using sigmoidal friction model (3-param).");
+    RCLCPP_INFO(get_node()->get_logger(),
+                "Friction model: %s (%zu joints).",
+                params_.friction.model_type.c_str(), num_joints_);
   }
 
   nullspace_projection_ = Eigen::MatrixXd::Identity(num_joints_, num_joints_);
