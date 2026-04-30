@@ -159,7 +159,7 @@ private:
   Eigen::VectorXd nullspace_weights_;
 
   /// Active friction model + per-joint parameters; populated in
-  /// on_init() via load_friction_state().
+  /// on_configure() via load_friction_state().
   FrictionState friction_state_;
 
   /// Nullspace projection matrix

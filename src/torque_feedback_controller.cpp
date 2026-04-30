@@ -165,22 +165,6 @@ CallbackReturn TorqueFeedbackController::on_init() {
     nullspace_weights_[i] = params_.nullspace.weights.joints_map.at(joint_names_[i]).value;
   }
 
-  // Load friction model — validates and populates friction_state_.
-  // Hard-error on failure: the RT loop has no NaN guard.
-  {
-    std::string err;
-    if (!load_friction_state(params_.friction,
-                             static_cast<int>(num_joints_),
-                             friction_state_, err)) {
-      RCLCPP_ERROR(get_node()->get_logger(),
-                   "Friction config invalid: %s", err.c_str());
-      return CallbackReturn::ERROR;
-    }
-    RCLCPP_INFO(get_node()->get_logger(),
-                "Friction model: %s (%zu joints).",
-                params_.friction.model_type.c_str(), num_joints_);
-  }
-
   nullspace_projection_ = Eigen::MatrixXd::Identity(num_joints_, num_joints_);
 
   joint_sub_ = get_node()->create_subscription<sensor_msgs::msg::JointState>(
@@ -260,6 +244,24 @@ TorqueFeedbackController::on_configure(const rclcpp_lifecycle::State & /*previou
 
   // Initialize jacobian matrix
   J_ = Eigen::MatrixXd::Zero(6, model_.nv);
+
+  // Loaded here (not on_init) because validation sizes against model_.nv,
+  // which only exists after buildReducedModel. Mirrors cartesian_controller
+  // and cartesian_admittance_controller. Hard-error: the RT loop has no NaN
+  // guard, so a misconfigured friction vector would propagate to commanded
+  // torque.
+  {
+    std::string err;
+    if (!load_friction_state(params_.friction, model_.nv,
+                             friction_state_, err)) {
+      RCLCPP_ERROR(get_node()->get_logger(),
+                   "Friction config invalid: %s", err.c_str());
+      return CallbackReturn::ERROR;
+    }
+    RCLCPP_INFO(get_node()->get_logger(),
+                "Friction model: %s (%d DoF).",
+                params_.friction.model_type.c_str(), model_.nv);
+  }
 
   wrench_pub_ = get_node()->create_publisher<geometry_msgs::msg::WrenchStamped>(
     "~/commanded_wrench", rclcpp::QoS(10));
