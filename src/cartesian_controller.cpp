@@ -345,6 +345,17 @@ CartesianController::on_configure(const rclcpp_lifecycle::State & /*previous_sta
   
   // Preallocate the matrices and vectors that will be used in the control loop
   end_effector_frame_id = model_.getFrameId(params_.end_effector_frame);
+  // pinocchio::Model::getFrameId returns model_.nframes (one past last) when
+  // the frame is missing, with no error. Without this check, downstream
+  // indexing into data_.oMf is out-of-bounds and produces a garbage Jacobian
+  // — has triggered runaway torques in production.
+  if (end_effector_frame_id >= model_.nframes) {
+    RCLCPP_ERROR_STREAM(
+      get_node()->get_logger(),
+      "End-effector frame '" << params_.end_effector_frame
+        << "' not found in the Pinocchio model built from the URDF.");
+    return CallbackReturn::ERROR;
+  }
   q = Eigen::VectorXd::Zero(model_.nv);
   q_pin = Eigen::VectorXd::Zero(model_.nq);
   dq = Eigen::VectorXd::Zero(model_.nv);
