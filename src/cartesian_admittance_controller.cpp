@@ -292,6 +292,40 @@ CartesianAdmittanceController::update(const rclcpp::Time & time, const rclcpp::D
     params_ = params_listener_->get_params();
     setStiffnessAndDamping();
     setAdmittanceParameters();
+
+    // Friction state — atomic reload (validate first, assign last). On
+    // model_type change or value validation failure, keep previous
+    // friction_state_ to avoid NaN / torque jumps at 500 Hz.
+    {
+      std::string err;
+      if (!reload_friction_state(params_.friction, model_.nv,
+                                 friction_model_type_locked_,
+                                 friction_state_, err)) {
+        RCLCPP_ERROR_STREAM_THROTTLE(
+          get_node()->get_logger(), *get_node()->get_clock(), 1000,
+          "Live friction param update rejected (keeping previous): " << err);
+      }
+    }
+
+    // EE / FT frames — structural, locked at configure. Detect attempted
+    // runtime changes and reject loudly so the operator notices the
+    // `param set` was a no-op. We don't re-resolve because the
+    // target_pose / wrench-transform state was seeded in the OLD frame
+    // at on_activate. Restart the controller to switch frames.
+    if (params_.end_effector_frame != ee_frame_name_cached_) {
+      RCLCPP_ERROR_STREAM_THROTTLE(
+        get_node()->get_logger(), *get_node()->get_clock(), 1000,
+        "Live end_effector_frame change ('" << ee_frame_name_cached_
+          << "' -> '" << params_.end_effector_frame
+          << "') rejected — restart the controller to switch frames");
+    }
+    if (params_.ft_sensor.frame != ft_sensor_frame_name_cached_) {
+      RCLCPP_ERROR_STREAM_THROTTLE(
+        get_node()->get_logger(), *get_node()->get_clock(), 1000,
+        "Live ft_sensor.frame change ('" << ft_sensor_frame_name_cached_
+          << "' -> '" << params_.ft_sensor.frame
+          << "') rejected — restart the controller to switch frames");
+    }
   }
 
   log_debug_info(time);
@@ -417,7 +451,13 @@ CartesianAdmittanceController::on_configure(const rclcpp_lifecycle::State & /*pr
   Id_nv = Eigen::MatrixXd::Identity(model_.nv, model_.nv);
 
   // Load friction model — validates and populates friction_state_.
-  // Hard-error on failure: NaN at 500 Hz on the real arm is unsafe.
+  // Hard-error on configure-time failure: NaN at 500 Hz is unsafe.
+  // We capture the model_type here and lock it: per-joint friction
+  // values can be tuned live via `ros2 param set`, but the model itself
+  // cannot change at runtime. Reason is semantic, not RT-allocation —
+  // a silent mid-flight stribeck → sigmoidal switch would drop the f_v
+  // term and discontinuously jump the friction torque, dangerous on a
+  // real arm. Restart the controller to switch.
   {
     std::string err;
     if (!load_friction_state(params_.friction, model_.nv, friction_state_, err)) {
@@ -429,6 +469,14 @@ CartesianAdmittanceController::on_configure(const rclcpp_lifecycle::State & /*pr
                 "Friction model: %s (%d joints).",
                 params_.friction.model_type.c_str(), model_.nv);
   }
+  friction_model_type_locked_ = params_.friction.model_type;
+  // EE / FT frames are structural — locked at configure time. Cache
+  // the names so the RT-loop refresh can detect attempted runtime
+  // changes and reject them with throttled errors instead of silently
+  // re-resolving (which would mismatch target_pose / wrench-transform
+  // state seeded in the OLD frame at on_activate).
+  ee_frame_name_cached_ = params_.end_effector_frame;
+  ft_sensor_frame_name_cached_ = params_.ft_sensor.frame;
 
   nullspace_stiffness = Eigen::MatrixXd::Zero(model_.nv, model_.nv);
   nullspace_damping = Eigen::MatrixXd::Zero(model_.nv, model_.nv);

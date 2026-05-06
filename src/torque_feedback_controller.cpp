@@ -131,11 +131,40 @@ controller_interface::return_type TorqueFeedbackController::update(
   }
 
   params_listener_->refresh_dynamic_parameters();
-  params_ = params_listener_->get_params();
+  if (params_listener_->is_old(params_)) {
+    params_ = params_listener_->get_params();
 
-  // Update nullspace weights
-  for (size_t i = 0; i < joint_names_.size(); ++i) {
-    nullspace_weights_[i] = params_.nullspace.weights.joints_map.at(joint_names_[i]).value;
+    // Update nullspace weights — only when params actually changed.
+    for (size_t i = 0; i < joint_names_.size(); ++i) {
+      nullspace_weights_[i] = params_.nullspace.weights.joints_map.at(joint_names_[i]).value;
+    }
+
+    // Friction state — atomic reload (validate first, assign last). On
+    // model_type change or value validation failure, keep previous
+    // friction_state_ to avoid NaN / torque jumps at 500 Hz.
+    {
+      std::string err;
+      if (!reload_friction_state(params_.friction, model_.nv,
+                                 friction_model_type_locked_,
+                                 friction_state_, err)) {
+        RCLCPP_ERROR_STREAM_THROTTLE(
+          get_node()->get_logger(), *get_node()->get_clock(), 1000,
+          "Live friction param update rejected (keeping previous): " << err);
+      }
+    }
+
+    // EE frame — structural, locked at configure. Detect attempted
+    // runtime changes and reject loudly so the operator notices the
+    // `param set` was a no-op. We don't re-resolve because Jacobian
+    // computation downstream uses end_effector_frame_id_ from the OLD
+    // frame. Restart the controller to switch.
+    if (params_.end_effector_frame != ee_frame_name_cached_) {
+      RCLCPP_ERROR_STREAM_THROTTLE(
+        get_node()->get_logger(), *get_node()->get_clock(), 1000,
+        "Live end_effector_frame change ('" << ee_frame_name_cached_
+          << "' -> '" << params_.end_effector_frame
+          << "') rejected — restart the controller to switch frames");
+    }
   }
 
   return controller_interface::return_type::OK;
@@ -246,10 +275,13 @@ TorqueFeedbackController::on_configure(const rclcpp_lifecycle::State & /*previou
   J_ = Eigen::MatrixXd::Zero(6, model_.nv);
 
   // Loaded here (not on_init) because validation sizes against model_.nv,
-  // which only exists after buildReducedModel. Mirrors cartesian_controller
-  // and cartesian_admittance_controller. Hard-error: the RT loop has no NaN
-  // guard, so a misconfigured friction vector would propagate to commanded
-  // torque.
+  // which only exists after buildReducedModel. Hard-error on configure-
+  // time failure: the RT loop has no NaN guard, so a misconfigured
+  // friction vector would propagate to commanded torque. We capture
+  // the model_type here and lock it: per-joint friction values can be
+  // tuned live via `ros2 param set`, but the model itself cannot change
+  // at runtime — a silent stribeck → sigmoidal switch would drop f_v
+  // and discontinuously jump the friction torque at 500 Hz.
   {
     std::string err;
     if (!load_friction_state(params_.friction, model_.nv,
@@ -262,6 +294,11 @@ TorqueFeedbackController::on_configure(const rclcpp_lifecycle::State & /*previou
                 "Friction model: %s (%d DoF).",
                 params_.friction.model_type.c_str(), model_.nv);
   }
+  friction_model_type_locked_ = params_.friction.model_type;
+  // EE frame is structural — locked at configure time. Cache the name
+  // so the RT-loop refresh detects attempted runtime changes and
+  // rejects them with a throttled error.
+  ee_frame_name_cached_ = params_.end_effector_frame;
 
   wrench_pub_ = get_node()->create_publisher<geometry_msgs::msg::WrenchStamped>(
     "~/commanded_wrench", rclcpp::QoS(10));

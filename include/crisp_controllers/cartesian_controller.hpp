@@ -213,6 +213,10 @@ private:
 
   /** @brief Frame ID of the end effector in the robot model */
   int end_effector_frame_id;
+  /** @brief Cached EE-frame param string. Used to detect runtime changes to
+   *         end_effector_frame so end_effector_frame_id is re-resolved
+   *         only when the string actually differs. */
+  std::string ee_frame_name_cached_;
 
   /** @brief Pinocchio robot model */
   pinocchio::Model model_;
@@ -262,6 +266,10 @@ private:
   /** @brief Active friction model + per-joint parameters; populated in
    *         on_configure() via load_friction_state(). */
   FrictionState friction_state_;
+  /** @brief Initial friction.model_type captured at on_configure. Runtime
+   *         changes to model_type are rejected to avoid RT-loop allocation
+   *         of the per-branch Eigen vectors. */
+  std::string friction_model_type_locked_;
 
   /** @brief Allowed type of joints **/
   const std::unordered_set<std::basic_string<char>> allowed_joint_types = {

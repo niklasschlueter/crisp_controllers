@@ -235,6 +235,14 @@ private:
   int end_effector_frame_id;
   /** @brief Frame ID of the F/T sensor measurement frame in the robot model */
   int ft_sensor_frame_id;
+  /** @brief Cached frame-name strings; used to detect runtime changes
+   *         to end_effector_frame / ft_sensor.frame so the frame IDs
+   *         are re-resolved only when the strings actually differ. */
+  std::string ee_frame_name_cached_;
+  std::string ft_sensor_frame_name_cached_;
+  /** @brief Initial friction.model_type captured at on_configure. Runtime
+   *         changes to model_type are rejected. */
+  std::string friction_model_type_locked_;
   /** @brief Pinocchio robot model */
   pinocchio::Model model_;
   /** @brief Pinocchio data for computations */

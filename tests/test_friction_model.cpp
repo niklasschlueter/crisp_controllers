@@ -247,6 +247,116 @@ TEST(FrictionLoaderTest, StribeckAutoDefaultsK) {
   EXPECT_NEAR(state.s_k(1), 5.0 / 0.05,  1e-9);
 }
 
+// --- Loader: atomicity + runtime-reload safety ---
+//
+// The RT-loop param-refresh hook calls load_friction_state on every
+// is_old() trigger. A rejected update must leave FrictionState unchanged.
+
+TEST(FrictionLoaderTest, AtomicityOnInvalidVsLeavesPreviousState) {
+  // First load a valid stribeck config, capture the resulting state.
+  FakeFrictionParams good;
+  good.model_type = "stribeck";
+  good.stribeck.f_c = {2.5, 5.0};
+  good.stribeck.f_s = {5.0, 8.0};
+  good.stribeck.v_s = {0.005, 0.05};
+  good.stribeck.f_v = {4.0, 25.0};
+
+  FrictionState state;
+  std::string err;
+  ASSERT_TRUE(load_friction_state(good, /*nv=*/2, state, err)) << err;
+  const Eigen::VectorXd expected_f_c = state.s_f_c;
+  const Eigen::VectorXd expected_v_s = state.s_v_s;
+
+  // Now attempt a load with negative v_s — must be rejected, state unchanged.
+  FakeFrictionParams bad = good;
+  bad.stribeck.v_s = {-0.01, 0.05};
+  EXPECT_FALSE(load_friction_state(bad, /*nv=*/2, state, err));
+  EXPECT_TRUE(state.s_f_c.isApprox(expected_f_c))
+    << "Rejected update must leave s_f_c unchanged";
+  EXPECT_TRUE(state.s_v_s.isApprox(expected_v_s))
+    << "Rejected update must leave s_v_s unchanged";
+}
+
+TEST(FrictionLoaderTest, RuntimeParamUpdateAppliesNewValues) {
+  // Simulate the RT-loop reload path: load valid stribeck twice with
+  // different per-joint values; the second load must produce the new
+  // values (and must not allocate beyond the first call's storage).
+  FakeFrictionParams p;
+  p.model_type = "stribeck";
+  p.stribeck.f_c = {2.5, 5.0};
+  p.stribeck.f_s = {5.0, 8.0};
+  p.stribeck.v_s = {0.005, 0.05};
+  p.stribeck.f_v = {4.0, 25.0};
+
+  FrictionState state;
+  std::string err;
+  ASSERT_TRUE(load_friction_state(p, /*nv=*/2, state, err)) << err;
+
+  // Bump f_c — what the user does at runtime when tweaking comp magnitude.
+  p.stribeck.f_c = {16.0, 5.0};
+  ASSERT_TRUE(load_friction_state(p, /*nv=*/2, state, err)) << err;
+  EXPECT_NEAR(state.s_f_c(0), 16.0, 1e-9);
+  EXPECT_NEAR(state.s_f_c(1),  5.0, 1e-9);
+}
+
+TEST(FrictionLoaderTest, ReloadRejectsModelTypeChange) {
+  // reload_friction_state is the RT-loop variant that enforces a lock
+  // on model_type. Switching model_type at runtime would silently change
+  // the friction-torque output at 500 Hz; reject loudly instead.
+  FakeFrictionParams p;
+  p.model_type = "stribeck";
+  p.stribeck.f_c = {2.5, 5.0};
+  p.stribeck.f_s = {5.0, 8.0};
+  p.stribeck.v_s = {0.005, 0.05};
+  p.stribeck.f_v = {4.0, 25.0};
+
+  FrictionState state;
+  std::string err;
+  ASSERT_TRUE(load_friction_state(p, /*nv=*/2, state, err)) << err;
+  const Eigen::VectorXd expected_f_c = state.s_f_c;
+
+  // User attempts to switch to sigmoidal at runtime — must be rejected.
+  p.model_type = "sigmoidal";
+  p.fp1 = {1.0, 2.0};
+  p.fp2 = {10.0, 20.0};
+  p.fp3 = {0.1, 0.2};
+  EXPECT_FALSE(crisp_controllers::reload_friction_state(
+    p, /*nv=*/2, /*locked_model_type=*/"stribeck", state, err));
+  EXPECT_NE(err.find("model_type change"), std::string::npos);
+  // State must still hold the original stribeck values.
+  EXPECT_EQ(state.type, FrictionModelType::kStribeck);
+  EXPECT_TRUE(state.s_f_c.isApprox(expected_f_c));
+
+  // Same model_type, valid values — must succeed.
+  p.model_type = "stribeck";
+  p.stribeck.f_c = {16.0, 5.0};
+  ASSERT_TRUE(crisp_controllers::reload_friction_state(
+    p, /*nv=*/2, /*locked_model_type=*/"stribeck", state, err)) << err;
+  EXPECT_NEAR(state.s_f_c(0), 16.0, 1e-9);
+}
+
+TEST(FrictionLoaderTest, RepeatedReloadsIdempotent) {
+  // Loading the same valid config N times must yield the same state.
+  FakeFrictionParams p;
+  p.model_type = "stribeck";
+  p.stribeck.f_c = {2.5, 5.0};
+  p.stribeck.f_s = {5.0, 8.0};
+  p.stribeck.v_s = {0.005, 0.05};
+  p.stribeck.f_v = {4.0, 25.0};
+
+  FrictionState state;
+  std::string err;
+  ASSERT_TRUE(load_friction_state(p, /*nv=*/2, state, err)) << err;
+  const Eigen::VectorXd ref_f_c = state.s_f_c;
+  const Eigen::VectorXd ref_k   = state.s_k;
+
+  for (int i = 0; i < 3; ++i) {
+    ASSERT_TRUE(load_friction_state(p, /*nv=*/2, state, err)) << err;
+    EXPECT_TRUE(state.s_f_c.isApprox(ref_f_c)) << "drift at iter " << i;
+    EXPECT_TRUE(state.s_k.isApprox(ref_k))     << "drift at iter " << i;
+  }
+}
+
 int main(int argc, char ** argv) {
   testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

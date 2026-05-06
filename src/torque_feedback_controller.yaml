@@ -26,6 +26,7 @@ torque_feedback_controller:
   end_effector_frame:
     type: string
     description: "Name of the end-effector frame for jacobian computation"
+    read_only: true
   torque_threshold:
     type: double
     default_value: 0.1
@@ -77,8 +78,13 @@ torque_feedback_controller:
     model_type:
       type: string
       default_value: "sigmoidal"
+      read_only: true
       description: >
-        Friction model type.
+        Friction model type. Locked at on_configure: per-joint friction
+        values can be tuned via `ros2 param set` at runtime, but the
+        model itself cannot — a silent stribeck → sigmoidal switch
+        would discontinuously change the friction-torque output at
+        500 Hz. Restart the controller to switch.
         'sigmoidal': 3-param model f(dq)=fp1/(1+exp(-fp2*(dq+fp3)))-fp1/(1+exp(-fp2*fp3))
         from Cognetti, FrankaEmikaPandaDynModel.
         'sigmoidal_viscous': 5-param model f(dq)=f_v*dq+f_o+f_c/(1+exp(-alpha*(dq+ni)))

@@ -171,6 +171,13 @@ private:
 
   /// End-effector frame ID for jacobian computation
   pinocchio::FrameIndex end_effector_frame_id_;
+  /// Cached EE-frame param string. Used to detect runtime changes to
+  /// end_effector_frame so end_effector_frame_id_ is re-resolved only
+  /// when the string actually differs.
+  std::string ee_frame_name_cached_;
+  /// Initial friction.model_type captured at on_configure. Runtime
+  /// changes to model_type are rejected.
+  std::string friction_model_type_locked_;
 
   /// Jacobian matrix for nullspace projection
   Eigen::MatrixXd J_;

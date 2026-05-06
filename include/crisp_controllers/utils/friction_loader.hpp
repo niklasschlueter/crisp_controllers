@@ -74,11 +74,19 @@ inline bool load_friction_state(const FrictionParams & p, int nv,
 
   const std::string & mt = p.model_type;
 
+  // Each branch validates fully against the source std::vector<double>
+  // BEFORE writing to `out`. A rejected update returns early and leaves
+  // `out` unchanged. The Eigen assignments later in each branch are
+  // alloc-free in steady state because the caller's model_.nv (and thus
+  // the existing vector size) is invariant after on_configure — that
+  // invariant is what makes this safe to call from the RT loop, not
+  // some structural exception-safety guarantee.
   if (mt == "sigmoidal") {
-    out.type = FrictionModelType::kSignoidal;
     if (!require_size(p.fp1, nv, "friction.fp1", error_msg)) return false;
     if (!require_size(p.fp2, nv, "friction.fp2", error_msg)) return false;
     if (!require_size(p.fp3, nv, "friction.fp3", error_msg)) return false;
+    // All validation passed — atomic write.
+    out.type = FrictionModelType::kSignoidal;
     out.fp1 = to_eigen(p.fp1).head(nv);
     out.fp2 = to_eigen(p.fp2).head(nv);
     out.fp3 = to_eigen(p.fp3).head(nv);
@@ -86,12 +94,13 @@ inline bool load_friction_state(const FrictionParams & p, int nv,
   }
 
   if (mt == "sigmoidal_viscous") {
-    out.type = FrictionModelType::kSigmoidalViscous;
     if (!require_size(p.f_v, nv, "friction.f_v", error_msg)) return false;
     if (!require_size(p.f_o, nv, "friction.f_o", error_msg)) return false;
     if (!require_size(p.f_c, nv, "friction.f_c", error_msg)) return false;
     if (!require_size(p.alpha, nv, "friction.alpha", error_msg)) return false;
     if (!require_size(p.ni, nv, "friction.ni", error_msg)) return false;
+    // All validation passed — atomic write.
+    out.type = FrictionModelType::kSigmoidalViscous;
     out.f_v = to_eigen(p.f_v).head(nv);
     out.f_o = to_eigen(p.f_o).head(nv);
     out.f_c = to_eigen(p.f_c).head(nv);
@@ -101,33 +110,42 @@ inline bool load_friction_state(const FrictionParams & p, int nv,
   }
 
   if (mt == "stribeck") {
-    out.type = FrictionModelType::kStribeck;
     if (!require_size(p.stribeck.f_c, nv, "friction.stribeck.f_c", error_msg)) return false;
     if (!require_size(p.stribeck.f_s, nv, "friction.stribeck.f_s", error_msg)) return false;
     if (!require_size(p.stribeck.v_s, nv, "friction.stribeck.v_s", error_msg)) return false;
     if (!require_size(p.stribeck.f_v, nv, "friction.stribeck.f_v", error_msg)) return false;
+    // v_s must be strictly positive (divisor in the Stribeck exp term).
+    for (int i = 0; i < nv; ++i) {
+      if (p.stribeck.v_s[i] <= 0.0) {
+        error_msg = "friction.stribeck.v_s must be strictly positive";
+        return false;
+      }
+    }
+    // If `k` is provided, validate size + positivity against the source.
+    // k <= 0 produces tanh(0·dq) = 0 (no Stribeck shape) or sign-flipped
+    // friction (negative damping at zero) — both are unsafe.
+    const bool k_default = p.stribeck.k.empty();
+    if (!k_default) {
+      if (!require_size(p.stribeck.k, nv, "friction.stribeck.k", error_msg)) return false;
+      for (int i = 0; i < nv; ++i) {
+        if (p.stribeck.k[i] <= 0.0) {
+          error_msg = "friction.stribeck.k must be strictly positive (per-joint).";
+          return false;
+        }
+      }
+    }
+    // All validation passed — atomic write.
+    out.type = FrictionModelType::kStribeck;
     out.s_f_c = to_eigen(p.stribeck.f_c).head(nv);
     out.s_f_s = to_eigen(p.stribeck.f_s).head(nv);
     out.s_v_s = to_eigen(p.stribeck.v_s).head(nv);
     out.s_f_v = to_eigen(p.stribeck.f_v).head(nv);
-    // Reject any v_s_j == 0 (would divide by zero in the Stribeck exp term).
-    if ((out.s_v_s.array() <= 0.0).any()) {
-      error_msg = "friction.stribeck.v_s must be strictly positive";
-      return false;
-    }
-    // If `k` is empty, default to 5/v_s_j per joint (smoothing band 1/5 of
-    // Stribeck width — keeps the dip from being washed out by tanh).
-    if (p.stribeck.k.empty()) {
+    // Default k_j = 5/v_s_j: smoothing band 1/5 of Stribeck width, keeps
+    // the dip from being washed out by tanh. v_s positivity already verified.
+    if (k_default) {
       out.s_k = (5.0 / out.s_v_s.array()).matrix();
     } else {
-      if (!require_size(p.stribeck.k, nv, "friction.stribeck.k", error_msg)) return false;
       out.s_k = to_eigen(p.stribeck.k).head(nv);
-    }
-    // k must be strictly positive: k <= 0 produces tanh(0·dq) = 0 (no
-    // Stribeck shape) or sign-flipped friction (negative damping at zero).
-    if ((out.s_k.array() <= 0.0).any()) {
-      error_msg = "friction.stribeck.k must be strictly positive (per-joint).";
-      return false;
     }
     return true;
   }
@@ -135,6 +153,28 @@ inline bool load_friction_state(const FrictionParams & p, int nv,
   error_msg = "unknown friction.model_type \"" + mt
               + "\"; expected one of \"sigmoidal\", \"sigmoidal_viscous\", \"stribeck\"";
   return false;
+}
+
+// RT-loop variant of load_friction_state: enforces a lock on
+// `model_type`. Use this from the controller's `is_old()` block; use
+// the un-locked overload from on_configure() to capture the initial
+// model. Rationale for the lock is semantic, not RT-allocation: a
+// silent mid-flight switch from e.g. stribeck to sigmoidal would drop
+// the f_v term and discontinuously change the friction-torque output
+// at 500 Hz — dangerous on a real arm. Better to reject loudly so the
+// operator notices the no-op.
+template <typename FrictionParams>
+inline bool reload_friction_state(const FrictionParams & p, int nv,
+                                  const std::string & locked_model_type,
+                                  FrictionState & out,
+                                  std::string & error_msg) {
+  if (p.model_type != locked_model_type) {
+    error_msg = "friction.model_type change ('" + locked_model_type
+              + "' -> '" + p.model_type + "') rejected — restart the "
+                "controller to switch friction models";
+    return false;
+  }
+  return load_friction_state(p, nv, out, error_msg);
 }
 
 // Writes the per-joint friction torque into `out` (must already be sized
