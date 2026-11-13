@@ -15,7 +15,7 @@
 #include <fmt/format.h>
 #include <pinocchio/algorithm/aba.hpp>
 #include <pinocchio/algorithm/compute-all-terms.hpp>
-#include <pinocchio/algorithm/frames.hxx>
+#include <pinocchio/algorithm/frames.hpp>
 #include <pinocchio/algorithm/rnea.hpp>
 #include <pinocchio/multibody/fwd.hpp>
 #include <pinocchio/parsers/urdf.hpp>

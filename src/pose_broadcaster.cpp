@@ -6,7 +6,7 @@
 #include <cassert>
 #include <cmath>
 #include <memory>
-#include <pinocchio/algorithm/frames.hxx>
+#include <pinocchio/algorithm/frames.hpp>
 #include <pinocchio/algorithm/kinematics.hpp>
 #include <pinocchio/algorithm/model.hpp>
 #include <pinocchio/parsers/urdf.hpp>

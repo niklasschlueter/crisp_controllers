@@ -5,8 +5,7 @@
 #include <crisp_controllers/torque_feedback_controller_parameters.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <geometry_msgs/msg/wrench_stamped.hpp>
-#include <pinocchio/multibody/model.hpp>
-#include <pinocchio/multibody/data.hpp>
+#include <pinocchio/multibody.hpp>
 
 using CallbackReturn =
     rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
