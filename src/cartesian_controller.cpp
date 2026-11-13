@@ -65,19 +65,19 @@ CartesianController::update(const rclcpp::Time &time,
 
     /*q[i] = exponential_moving_average(q[i], state_interfaces_[i].get_value(),*/
     /*                                  params_.filter.q);*/
-    q[i] = state_interfaces_[i].get_value();
+    auto q_val = state_interfaces_[i].get_value();
+    q[joint.idx_v()] = q_val;  // Use Pinocchio ordering for nullspace control
     if (continous_joint_types.count(
                    joint.shortname())) { // Then we are handling a continous
                                          // joint that is SO(2)
-      q_pin[joint.idx_q()] = std::cos(q[i]);
-      q_pin[joint.idx_q() + 1] = std::sin(q[i]);
+      q_pin[joint.idx_q()] = std::cos(q_val);
+      q_pin[joint.idx_q() + 1] = std::sin(q_val);
     } else {  // simple revolute joint case
-      q_pin[joint.idx_q()] = q[i];
+      q_pin[joint.idx_q()] = q_val;
     }
-    /*dq[i] = exponential_moving_average(*/
-    /*    dq[i], state_interfaces_[num_joints + i].get_value(),*/
-    /*    params_.filter.dq);*/
-    dq[i] = state_interfaces_[num_joints + i].get_value();
+    dq[joint.idx_v()] = exponential_moving_average(
+        dq[joint.idx_v()], state_interfaces_[num_joints + i].get_value(),
+        params_.filter.dq);
   }
 
   if (new_target_pose_) {parse_target_pose_(); new_target_pose_ = false;}
@@ -204,7 +204,9 @@ CartesianController::update(const rclcpp::Time &time,
 
   if (not params_.stop_commands) {
     for (size_t i = 0; i < num_joints; ++i) {
-      command_interfaces_[i].set_value(tau_d[i]);
+      auto joint_id = model_.getJointId(params_.joints[i]);
+      auto joint = model_.joints[joint_id];
+      command_interfaces_[i].set_value(tau_d[joint.idx_v()]);
     }
   }
 
@@ -309,6 +311,15 @@ CallbackReturn CartesianController::on_configure(
     }
   }
 
+  // Debug: Print joint types and Pinocchio indices
+  for (const auto& joint_name : params_.joints) {
+    auto joint_id = model_.getJointId(joint_name);
+    auto joint = model_.joints[joint_id];
+    RCLCPP_INFO(get_node()->get_logger(),
+        "Joint '%s' -> type: %s, idx_q: %d, idx_v: %d",
+        joint_name.c_str(), joint.shortname().c_str(), joint.idx_q(), joint.idx_v());
+  }
+
   end_effector_frame_id = model_.getFrameId(params_.end_effector_frame);
   q = Eigen::VectorXd::Zero(model_.nv);
   q_pin = Eigen::VectorXd::Zero(model_.nq);
@@ -318,10 +329,17 @@ CallbackReturn CartesianController::on_configure(
   tau_previous = Eigen::VectorXd::Zero(model_.nv);
   J = Eigen::MatrixXd::Zero(6, model_.nv);
 
-  // Map the friction parameters to Eigen vectors
-  fp1 = Eigen::Map<Eigen::VectorXd>(params_.friction.fp1.data(), model_.nv);
-  fp2 = Eigen::Map<Eigen::VectorXd>(params_.friction.fp2.data(), model_.nv);
-  fp3 = Eigen::Map<Eigen::VectorXd>(params_.friction.fp3.data(), model_.nv);
+  // Map the friction parameters to Eigen vectors in Pinocchio ordering
+  fp1 = Eigen::VectorXd::Zero(model_.nv);
+  fp2 = Eigen::VectorXd::Zero(model_.nv);
+  fp3 = Eigen::VectorXd::Zero(model_.nv);
+  for (size_t i = 0; i < params_.joints.size(); ++i) {
+    auto joint_id = model_.getJointId(params_.joints[i]);
+    auto joint = model_.joints[joint_id];
+    fp1[joint.idx_v()] = params_.friction.fp1[i];
+    fp2[joint.idx_v()] = params_.friction.fp2[i];
+    fp3[joint.idx_v()] = params_.friction.fp3[i];
+  }
 
   nullspace_stiffness = Eigen::MatrixXd::Zero(model_.nv, model_.nv);
   nullspace_damping = Eigen::MatrixXd::Zero(model_.nv, model_.nv);
@@ -430,9 +448,11 @@ void CartesianController::setStiffnessAndDamping() {
   nullspace_stiffness.setZero();
   nullspace_damping.setZero();
 
-  auto weights = Eigen::VectorXd(model_.nv);
+  Eigen::VectorXd weights = Eigen::VectorXd::Zero(model_.nv);
   for (size_t i = 0; i < params_.joints.size(); ++i) {
-    weights[i] =
+    auto joint_id = model_.getJointId(params_.joints[i]);
+    int idx_v = model_.joints[joint_id].idx_v();
+    weights[idx_v] =
         params_.nullspace.weights.joints_map.at(params_.joints.at(i)).value;
   }
   nullspace_stiffness.diagonal() << params_.nullspace.stiffness * weights;
@@ -458,20 +478,21 @@ CallbackReturn CartesianController::on_activate(
         model_.getJointId(joint_name); // pinocchio joind id might be different
     auto joint = model_.joints[joint_id];
 
-    q[i] = state_interfaces_[i].get_value();
-    if (joint.shortname() == "JointModelRZ") { // simple revolute joint case
-      q_pin[joint.idx_q()] = q[i];
-    } else if (continous_joint_types.count(
+    auto q_val = state_interfaces_[i].get_value();
+    q[joint.idx_v()] = q_val;  // Use Pinocchio ordering for nullspace control
+    if (continous_joint_types.count(
                    joint.shortname())) { // Then we are handling a continous
                                          // joint that is SO(2)
-      q_pin[joint.idx_q()] = std::cos(q[i]);
-      q_pin[joint.idx_q() + 1] = std::sin(q[i]);
+      q_pin[joint.idx_q()] = std::cos(q_val);
+      q_pin[joint.idx_q() + 1] = std::sin(q_val);
+    } else { // simple revolute joint case (RX, RY, RZ, RevoluteUnaligned)
+      q_pin[joint.idx_q()] = q_val;
     }
 
-    q_ref[i] = state_interfaces_[i].get_value();
+    q_ref[joint.idx_v()] = q_val;  // Use Pinocchio ordering for nullspace control
 
-    dq[i] = state_interfaces_[num_joints + i].get_value();
-    dq_ref[i] = state_interfaces_[num_joints + i].get_value();
+    dq[joint.idx_v()] = state_interfaces_[num_joints + i].get_value();
+    dq_ref[joint.idx_v()] = state_interfaces_[num_joints + i].get_value();
   }
 
   pinocchio::forwardKinematics(model_, data_, q_pin, dq);
@@ -483,6 +504,22 @@ CallbackReturn CartesianController::on_activate(
   target_orientation_ = Eigen::Quaterniond(end_effector_pose.rotation());
   target_pose_ =
       pinocchio::SE3(target_orientation_.toRotationMatrix(), target_position_);
+
+  // Debug: Print interface ordering to verify correct mapping
+  RCLCPP_INFO(get_node()->get_logger(), "=== Interface Ordering Debug ===");
+  for (size_t i = 0; i < command_interfaces_.size(); ++i) {
+    RCLCPP_INFO(get_node()->get_logger(), "command_interfaces_[%zu] = %s",
+                i, command_interfaces_[i].get_name().c_str());
+  }
+  for (size_t i = 0; i < state_interfaces_.size(); ++i) {
+    RCLCPP_INFO(get_node()->get_logger(), "state_interfaces_[%zu] = %s (value: %.4f)",
+                i, state_interfaces_[i].get_name().c_str(), state_interfaces_[i].get_value());
+  }
+  RCLCPP_INFO(get_node()->get_logger(), "Expected order from params_.joints:");
+  for (size_t i = 0; i < params_.joints.size(); ++i) {
+    RCLCPP_INFO(get_node()->get_logger(), "  [%zu] %s", i, params_.joints[i].c_str());
+  }
+  RCLCPP_INFO(get_node()->get_logger(), "=================================");
 
   RCLCPP_INFO(get_node()->get_logger(), "Controller activated.");
   return CallbackReturn::SUCCESS;
@@ -506,14 +543,18 @@ void CartesianController::parse_target_pose_() {
 void CartesianController::parse_target_joint_() {
   auto msg = *target_joint_buffer_.readFromRT();
   if (msg->position.size()) {
-    for (size_t i = 0; i < msg->position.size(); ++i) {
-      q_ref[i] = msg->position[i];
+    for (size_t i = 0; i < msg->position.size() && i < params_.joints.size(); ++i) {
+      auto joint_id = model_.getJointId(params_.joints[i]);
+      auto joint = model_.joints[joint_id];
+      q_ref[joint.idx_v()] = msg->position[i];
     }
     /*filterJointValues(msg->name, msg->position, params_.joints, q_ref);*/
   }
   if (msg->velocity.size()) {
-    for (size_t i = 0; i < msg->position.size(); ++i) {
-      dq_ref[i] = msg->velocity[i];
+    for (size_t i = 0; i < msg->velocity.size() && i < params_.joints.size(); ++i) {
+      auto joint_id = model_.getJointId(params_.joints[i]);
+      auto joint = model_.joints[joint_id];
+      dq_ref[joint.idx_v()] = msg->velocity[i];
     }
     /*filterJointValues(msg->name, msg->velocity, params_.joints, dq_ref);*/
   }
