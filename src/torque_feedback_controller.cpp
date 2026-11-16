@@ -50,7 +50,7 @@ TorqueFeedbackController::state_interface_configuration() const {
 }
 
 controller_interface::return_type TorqueFeedbackController::update(
-  const rclcpp::Time & /*time*/, const rclcpp::Duration & /*period*/) {
+  const rclcpp::Time & time, const rclcpp::Duration & period) {
   // Update joint states
   for (int i = 0; i < num_joints_; i++) {
 #if ROS2_VERSION_ABOVE_HUMBLE
@@ -138,6 +138,8 @@ controller_interface::return_type TorqueFeedbackController::update(
     command_interfaces_[i].set_value(tau_commanded_[i]);
 #endif
   }
+
+  publish_wrench_(time, period);
 
   params_listener_->refresh_dynamic_parameters();
   params_ = params_listener_->get_params();
@@ -297,10 +299,9 @@ TorqueFeedbackController::on_configure(const rclcpp_lifecycle::State & /*previou
 
   wrench_pub_ = get_node()->create_publisher<geometry_msgs::msg::WrenchStamped>(
     "~/commanded_wrench", rclcpp::QoS(10));
-
-  wrench_timer_ = get_node()->create_wall_timer(
-    std::chrono::milliseconds(5),
-    std::bind(&TorqueFeedbackController::publish_wrench_callback_, this));
+  rt_wrench_pub_ =
+    std::make_shared<realtime_tools::RealtimePublisher<geometry_msgs::msg::WrenchStamped>>(
+      wrench_pub_);
 
   return CallbackReturn::SUCCESS;
 }
@@ -343,14 +344,23 @@ void TorqueFeedbackController::target_joint_callback_(
   }
 }
 
-void TorqueFeedbackController::publish_wrench_callback_() {
+void TorqueFeedbackController::publish_wrench_(
+  const rclcpp::Time & time, const rclcpp::Duration & period) {
+  // Runs in update() rather than a timer: J_ and tau_commanded_ are written here,
+  // so a timer thread reading them was a data race.
+  static const auto kPublishPeriod = rclcpp::Duration::from_nanoseconds(5'000'000);
+  wrench_elapsed_ = wrench_elapsed_ + period;
+  if (wrench_elapsed_ < kPublishPeriod) {
+    return;
+  }
+  wrench_elapsed_ = rclcpp::Duration(0, 0);
+
   // tau = J^T * F, so F = pinv(J^T) * tau. J^T * tau was dimensionally valid only
   // for 6 joints (an out-of-bounds read otherwise) and not the wrench even then.
   Eigen::VectorXd wrench_commanded = pseudo_inverse(J_.transpose()) * tau_commanded_;
 
-  // Create and publish wrench message
-  auto wrench_msg = geometry_msgs::msg::WrenchStamped();
-  wrench_msg.header.stamp = get_node()->get_clock()->now();
+  geometry_msgs::msg::WrenchStamped wrench_msg;
+  wrench_msg.header.stamp = time;
   wrench_msg.header.frame_id = params_.end_effector_frame;
 
   wrench_msg.wrench.force.x = wrench_commanded[0];
@@ -360,7 +370,14 @@ void TorqueFeedbackController::publish_wrench_callback_() {
   wrench_msg.wrench.torque.y = wrench_commanded[4];
   wrench_msg.wrench.torque.z = wrench_commanded[5];
 
-  wrench_pub_->publish(wrench_msg);
+#if REALTIME_TOOLS_NEW_API
+  (void)rt_wrench_pub_->try_publish(wrench_msg);
+#else
+  if (rt_wrench_pub_->trylock()) {
+    rt_wrench_pub_->msg_ = wrench_msg;
+    rt_wrench_pub_->unlockAndPublish();
+  }
+#endif
 }
 
 }  // namespace crisp_controllers

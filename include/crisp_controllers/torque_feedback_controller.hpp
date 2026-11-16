@@ -17,6 +17,7 @@
 #include <geometry_msgs/msg/wrench_stamped.hpp>
 #include <pinocchio/multibody/data.hpp>
 #include <pinocchio/multibody/model.hpp>
+#include <realtime_tools/realtime_publisher.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <crisp_controllers/utils/friction_model.hpp>
 
@@ -111,11 +112,13 @@ private:
   /// Subscriber for external torque commands
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_sub_;
 
-  /// Publisher for commanded wrench
+  /// Publisher for commanded wrench, used from update() through the RT wrapper
   rclcpp::Publisher<geometry_msgs::msg::WrenchStamped>::SharedPtr wrench_pub_;
+  std::shared_ptr<realtime_tools::RealtimePublisher<geometry_msgs::msg::WrenchStamped>>
+    rt_wrench_pub_;
 
-  /// Timer for 200Hz wrench publishing
-  rclcpp::TimerBase::SharedPtr wrench_timer_;
+  /// Time since the last wrench publication (throttles it to 200 Hz)
+  rclcpp::Duration wrench_elapsed_{0, 0};
 
   /**
    * @brief Callback for target joint state messages
@@ -127,11 +130,11 @@ private:
   void target_joint_callback_(const sensor_msgs::msg::JointState::SharedPtr msg);
 
   /**
-   * @brief Callback for wrench publishing timer
+   * @brief Publish the commanded wrench F = pinv(J^T) * tau at 200 Hz
    *
-   * Computes and publishes the commanded wrench F = pinv(J^T) * tau
+   * Called from update(), the thread that writes J_ and tau_commanded_.
    */
-  void publish_wrench_callback_();
+  void publish_wrench_(const rclcpp::Time & time, const rclcpp::Duration & period);
 
   /// Names of controlled joints
   std::vector<std::string> joint_names_;
