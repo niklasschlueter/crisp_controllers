@@ -344,9 +344,9 @@ void TorqueFeedbackController::target_joint_callback_(
 }
 
 void TorqueFeedbackController::publish_wrench_callback_() {
-  // Convert joint torques to Cartesian wrench using Jacobian transpose
-  // F = J^T * tau
-  Eigen::VectorXd wrench_commanded = J_.transpose() * tau_commanded_;
+  // tau = J^T * F, so F = pinv(J^T) * tau. J^T * tau was dimensionally valid only
+  // for 6 joints (an out-of-bounds read otherwise) and not the wrench even then.
+  Eigen::VectorXd wrench_commanded = pseudo_inverse(J_.transpose()) * tau_commanded_;
 
   // Create and publish wrench message
   auto wrench_msg = geometry_msgs::msg::WrenchStamped();

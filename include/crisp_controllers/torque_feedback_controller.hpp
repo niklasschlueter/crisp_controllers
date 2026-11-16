@@ -129,7 +129,7 @@ private:
   /**
    * @brief Callback for wrench publishing timer
    *
-   * Computes and publishes the commanded wrench using the Jacobian transpose
+   * Computes and publishes the commanded wrench F = pinv(J^T) * tau
    */
   void publish_wrench_callback_();
 
