@@ -2,7 +2,10 @@ twist_broadcaster:
   joints:
     type: string_array
     default_value: []
+    read_only: true
     description: "Names of the joints"
+    validation:
+      unique<>: []
   end_effector_frame:
     type: string
     description: "Name of the end-effector frame"

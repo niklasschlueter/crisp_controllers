@@ -5,6 +5,7 @@
 // NOLINTBEGIN(build/include_order)
 #include <crisp_controllers/torque_feedback_controller.hpp>
 #include <crisp_controllers/utils/friction_model.hpp>
+#include <crisp_controllers/utils/joint_ordering.hpp>
 #include <crisp_controllers/utils/pseudo_inverse.hpp>
 #include "crisp_controllers/utils/ros2_version.hpp"
 
@@ -198,12 +199,19 @@ CallbackReturn TorqueFeedbackController::on_init() {
     RCLCPP_INFO(get_node()->get_logger(), "Using sigmoidal_viscous friction model (5-param).");
   } else {
     friction_model_type_ = FrictionModelType::kSignoidal;
-    friction_fp1_ =
-      Eigen::Map<const Eigen::VectorXd>(params_.friction.fp1.data(), params_.friction.fp1.size());
-    friction_fp2_ =
-      Eigen::Map<const Eigen::VectorXd>(params_.friction.fp2.data(), params_.friction.fp2.size());
-    friction_fp3_ =
-      Eigen::Map<const Eigen::VectorXd>(params_.friction.fp3.data(), params_.friction.fp3.size());
+    // Friction is always applied here, so the arrays must cover every joint. Mapping
+    // their full length (7 by default) mismatched dq_'s size on other arms.
+    auto nj = static_cast<int>(num_joints_);
+    if (static_cast<int>(params_.friction.fp1.size()) < nj ||
+        static_cast<int>(params_.friction.fp2.size()) < nj ||
+        static_cast<int>(params_.friction.fp3.size()) < nj) {
+      RCLCPP_ERROR(get_node()->get_logger(),
+        "sigmoidal friction arrays fp1, fp2, fp3 must have size >= %d (num_joints)", nj);
+      return CallbackReturn::ERROR;
+    }
+    friction_fp1_ = Eigen::Map<const Eigen::VectorXd>(params_.friction.fp1.data(), nj);
+    friction_fp2_ = Eigen::Map<const Eigen::VectorXd>(params_.friction.fp2.data(), nj);
+    friction_fp3_ = Eigen::Map<const Eigen::VectorXd>(params_.friction.fp3.data(), nj);
     RCLCPP_INFO(get_node()->get_logger(), "Using sigmoidal friction model (3-param).");
   }
 
@@ -279,6 +287,11 @@ TorqueFeedbackController::on_configure(const rclcpp_lifecycle::State & /*previou
           << "Only revolute joints are supported.");
       return CallbackReturn::ERROR;
     }
+  }
+
+  if (const auto error = check_joint_order(model_, joint_names_); !error.empty()) {
+    RCLCPP_ERROR_STREAM(get_node()->get_logger(), error);
+    return CallbackReturn::ERROR;
   }
 
   // Get end-effector frame ID

@@ -26,6 +26,7 @@
 #include <crisp_controllers/pch.hpp>
 #include <crisp_controllers/utils/friction_model.hpp>
 #include <crisp_controllers/utils/joint_limits.hpp>
+#include <crisp_controllers/utils/joint_ordering.hpp>
 #include <crisp_controllers/utils/pseudo_inverse.hpp>
 #include "crisp_controllers/utils/fiters.hpp"
 #include "crisp_controllers/utils/torque_rate_saturation.hpp"
@@ -390,6 +391,11 @@ CartesianAdmittanceController::on_configure(const rclcpp_lifecycle::State & /*pr
     }
   }
 
+  if (const auto error = check_joint_order(model_, params_.joints); !error.empty()) {
+    RCLCPP_ERROR_STREAM(get_node()->get_logger(), error);
+    return CallbackReturn::ERROR;
+  }
+
   // Preallocate the matrices and vectors that will be used in the control loop
   end_effector_frame_id = model_.getFrameId(params_.end_effector_frame);
   if (params_.ft_sensor.frame.empty()) {
@@ -451,9 +457,23 @@ CartesianAdmittanceController::on_configure(const rclcpp_lifecycle::State & /*pr
     RCLCPP_INFO(get_node()->get_logger(), "Using sigmoidal_viscous friction model (5-param).");
   } else {
     friction_model_type_ = FrictionModelType::kSignoidal;
-    fp1 = Eigen::Map<Eigen::VectorXd>(params_.friction.fp1.data(), model_.nv);
-    fp2 = Eigen::Map<Eigen::VectorXd>(params_.friction.fp2.data(), model_.nv);
-    fp3 = Eigen::Map<Eigen::VectorXd>(params_.friction.fp3.data(), model_.nv);
+    if (static_cast<int>(params_.friction.fp1.size()) >= model_.nv &&
+        static_cast<int>(params_.friction.fp2.size()) >= model_.nv &&
+        static_cast<int>(params_.friction.fp3.size()) >= model_.nv) {
+      fp1 = Eigen::Map<Eigen::VectorXd>(params_.friction.fp1.data(), model_.nv);
+      fp2 = Eigen::Map<Eigen::VectorXd>(params_.friction.fp2.data(), model_.nv);
+      fp3 = Eigen::Map<Eigen::VectorXd>(params_.friction.fp3.data(), model_.nv);
+    } else if (params_.use_friction) {
+      RCLCPP_ERROR(get_node()->get_logger(),
+        "sigmoidal friction arrays fp1, fp2, fp3 must have size >= %d (nv)", model_.nv);
+      return CallbackReturn::ERROR;
+    } else {
+      // The defaults are sized for a 7-DoF arm. With friction off, zeros keep the
+      // vectors valid in case use_friction is enabled at runtime.
+      RCLCPP_WARN(get_node()->get_logger(),
+        "fp1, fp2, fp3 shorter than nv=%d; friction coefficients set to zero.", model_.nv);
+      fp1 = fp2 = fp3 = Eigen::VectorXd::Zero(model_.nv);
+    }
     RCLCPP_INFO(get_node()->get_logger(), "Using sigmoidal friction model (3-param).");
   }
 

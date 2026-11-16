@@ -1,7 +1,10 @@
 cartesian_controller:
   joints:
     type: string_array
-    description: "Names of the joints"
+    read_only: true
+    description: "Names of the joints, in the URDF tree order Pinocchio uses (checked at configure)"
+    validation:
+      unique<>: []
 
   end_effector_frame:
     type: string
