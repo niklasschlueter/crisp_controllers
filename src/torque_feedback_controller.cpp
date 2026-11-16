@@ -70,6 +70,14 @@ controller_interface::return_type TorqueFeedbackController::update(
   pinocchio::computeFrameJacobian(
     model_, data_, q_, end_effector_frame_id_, pinocchio::ReferenceFrame::LOCAL, J_);
 
+  // Take the latest external torques. The subscriber only hands over messages
+  // through the RT buffer, so tau_ext_ is never written concurrently.
+  if (const auto msg = *joint_source_buffer_.readFromRT()) {
+    for (int i = 0; i < num_joints_; i++) {
+      tau_ext_[i] = msg->effort[i];
+    }
+  }
+
   // Apply threshold to external torques based on vector magnitude
   Eigen::VectorXd tau_ext_thresholded = Eigen::VectorXd::Zero(num_joints_);
   double tau_ext_magnitude = tau_ext_.norm();
@@ -320,6 +328,8 @@ TorqueFeedbackController::on_activate(const rclcpp_lifecycle::State & /*previous
     tau_ext_[i] = 0.0;
     q_init_[i] = q_[i];
   }
+  // Drop a message left over from before (re)activation.
+  joint_source_buffer_.writeFromNonRT(nullptr);
 
   return CallbackReturn::SUCCESS;
 }
@@ -340,9 +350,7 @@ void TorqueFeedbackController::target_joint_callback_(
       msg->effort.size(), num_joints_);
     return;
   }
-  for (int i = 0; i < num_joints_; i++) {
-    tau_ext_[i] = msg->effort[i];
-  }
+  joint_source_buffer_.writeFromNonRT(msg);
 }
 
 void TorqueFeedbackController::publish_wrench_(

@@ -17,6 +17,7 @@
 #include <geometry_msgs/msg/wrench_stamped.hpp>
 #include <pinocchio/multibody/data.hpp>
 #include <pinocchio/multibody/model.hpp>
+#include <realtime_tools/realtime_buffer.hpp>
 #include <realtime_tools/realtime_publisher.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <crisp_controllers/utils/friction_model.hpp>
@@ -111,6 +112,8 @@ private:
 
   /// Subscriber for external torque commands
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_sub_;
+  /// Latest validated joint source message, handed from the subscriber to update()
+  realtime_tools::RealtimeBuffer<std::shared_ptr<sensor_msgs::msg::JointState>> joint_source_buffer_;
 
   /// Publisher for commanded wrench, used from update() through the RT wrapper
   rclcpp::Publisher<geometry_msgs::msg::WrenchStamped>::SharedPtr wrench_pub_;
@@ -149,7 +152,7 @@ private:
   /// Commanded joint torques (for wrench computation)
   Eigen::VectorXd tau_commanded_;
 
-  /// External torques received from subscriber
+  /// External torques from the latest joint source message (written in update() only)
   Eigen::VectorXd tau_ext_;
 
   /// Initial joint positions recorded on activation (nullspace target)
