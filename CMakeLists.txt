@@ -103,7 +103,6 @@ target_link_libraries(${PROJECT_NAME}
     project_compile_options
     pinocchio::pinocchio
 )
-target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_20)
 
 target_include_directories(${PROJECT_NAME}
     PUBLIC
