@@ -631,7 +631,9 @@ void CartesianController::setStiffnessAndDamping() {
   nullspace_stiffness.diagonal() << params_.nullspace.stiffness * weights;
   nullspace_damping.diagonal() << 2.0 * nullspace_stiffness.diagonal().cwiseSqrt();
 
-  if (params_.nullspace.damping) {
+  // Negative damping (the default -1) means "derive from stiffness". Testing the
+  // double for truthiness took -1 literally: positive velocity feedback.
+  if (params_.nullspace.damping >= 0.0) {
     nullspace_damping.diagonal() = params_.nullspace.damping * weights;
   } else {
     nullspace_damping.diagonal() = 2.0 * nullspace_stiffness.diagonal().cwiseSqrt();
