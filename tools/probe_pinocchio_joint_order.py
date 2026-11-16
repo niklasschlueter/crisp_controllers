@@ -31,7 +31,7 @@ if missing:
 
 # Same reduction as the controllers' on_configure: lock every unlisted joint at 0.
 locked = [raw.getJointId(n) for n in raw.names if n not in joints and n != "universe"]
-model = pin.buildReducedModel(raw, locked, np.zeros(raw.nq))
+model = pin.buildReducedModel(raw, locked, pin.neutral(raw))
 data = model.createData()
 
 # Arbitrary non-singular pose, assigned per listed joint like the state interfaces.

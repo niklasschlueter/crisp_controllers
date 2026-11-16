@@ -18,6 +18,7 @@
 #include <pinocchio/spatial/fwd.hpp>
 #include <pinocchio/algorithm/utils/force.hpp>
 
+#include "pinocchio/algorithm/joint-configuration.hpp"
 #include "pinocchio/algorithm/model.hpp"
 
 #include <std_msgs/msg/float64_multi_array.hpp>
@@ -373,7 +374,9 @@ CartesianAdmittanceController::on_configure(const rclcpp_lifecycle::State & /*pr
     }
   }
 
-  Eigen::VectorXd q_locked = Eigen::VectorXd::Zero(raw_model_.nq);
+  // Lock at the neutral configuration: zeros are invalid for continuous joints,
+  // whose (cos, sin) pair would become (0, 0).
+  Eigen::VectorXd q_locked = pinocchio::neutral(raw_model_);
   model_ = pinocchio::buildReducedModel(raw_model_, list_of_joints_to_lock_by_id, q_locked);
   data_ = pinocchio::Data(model_);
 

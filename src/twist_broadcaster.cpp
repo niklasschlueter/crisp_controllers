@@ -10,6 +10,7 @@
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <pinocchio/algorithm/frames.hpp>
 #include <pinocchio/algorithm/kinematics.hpp>
+#include <pinocchio/algorithm/joint-configuration.hpp>
 #include <pinocchio/algorithm/model.hpp>
 #include <pinocchio/parsers/urdf.hpp>
 #include <rclcpp/logging.hpp>
@@ -167,7 +168,9 @@ CallbackReturn TwistBroadcaster::on_configure(const rclcpp_lifecycle::State & /*
     }
   }
 
-  Eigen::VectorXd q_locked = Eigen::VectorXd::Zero(raw_model_.nq);
+  // Lock at the neutral configuration: zeros are invalid for continuous joints,
+  // whose (cos, sin) pair would become (0, 0).
+  Eigen::VectorXd q_locked = pinocchio::neutral(raw_model_);
   model_ = pinocchio::buildReducedModel(raw_model_, list_of_joints_to_lock_by_id, q_locked);
   data_ = pinocchio::Data(model_);
 
