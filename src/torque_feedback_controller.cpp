@@ -334,10 +334,17 @@ TorqueFeedbackController::on_deactivate(const rclcpp_lifecycle::State & /*previo
 
 void TorqueFeedbackController::target_joint_callback_(
   const sensor_msgs::msg::JointState::SharedPtr msg) {
-  for (size_t i = 0; i < msg->effort.size(); i++) {
-    if (static_cast<int>(i) < num_joints_) {
-      tau_ext_[i] = msg->effort[i];
-    }
+  // Efforts are applied by position. Names are not compared because the source is
+  // typically another arm (teleoperation) whose joints are named differently; it
+  // must publish one effort per joint, in the order of parameter 'joints'.
+  if (static_cast<int>(msg->effort.size()) != num_joints_) {
+    RCLCPP_WARN_THROTTLE(get_node()->get_logger(), *get_node()->get_clock(), 1000,
+      "Ignoring joint source message with %zu efforts, expected %d.",
+      msg->effort.size(), num_joints_);
+    return;
+  }
+  for (int i = 0; i < num_joints_; i++) {
+    tau_ext_[i] = msg->effort[i];
   }
 }
 

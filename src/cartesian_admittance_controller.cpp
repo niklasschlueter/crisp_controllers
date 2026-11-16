@@ -519,14 +519,24 @@ CartesianAdmittanceController::on_configure(const rclcpp_lifecycle::State & /*pr
     new_target_pose_ = true;
   };
 
+  // Copy of the joint list: update() reassigns params_ on the RT thread.
   auto target_joint_callback =
-    [this](const std::shared_ptr<sensor_msgs::msg::JointState> msg) -> void {
+    [this, joints = params_.joints](const std::shared_ptr<sensor_msgs::msg::JointState> msg) -> void {
     if (!check_topic_publisher_count("target_joint")) {
       RCLCPP_WARN_THROTTLE(
         get_node()->get_logger(),
         *get_node()->get_clock(),
         1000,
         "Ignoring target_joint message due to multiple publishers detected!");
+      return;
+    }
+    // Values are applied by position, so named messages must use our joint order.
+    if (!msg->name.empty() && msg->name != joints) {
+      RCLCPP_WARN_THROTTLE(
+        get_node()->get_logger(),
+        *get_node()->get_clock(),
+        1000,
+        "Ignoring target_joint message: its names do not match parameter 'joints' in order.");
       return;
     }
     target_joint_buffer_.writeFromNonRT(msg);
