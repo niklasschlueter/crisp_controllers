@@ -28,6 +28,7 @@
 #include <crisp_controllers/utils/friction_model.hpp>
 #include <crisp_controllers/utils/joint_limits.hpp>
 #include <crisp_controllers/utils/joint_ordering.hpp>
+#include <crisp_controllers/utils/robot_description.hpp>
 #include <crisp_controllers/utils/pseudo_inverse.hpp>
 #include "crisp_controllers/utils/fiters.hpp"
 #include "crisp_controllers/utils/torque_rate_saturation.hpp"
@@ -319,18 +320,10 @@ CallbackReturn CartesianAdmittanceController::on_init() {
 
 CallbackReturn
 CartesianAdmittanceController::on_configure(const rclcpp_lifecycle::State & /*previous_state*/) {
-  auto parameters_client =
-    std::make_shared<rclcpp::AsyncParametersClient>(get_node(), "robot_state_publisher");
-  parameters_client->wait_for_service();
-
-  auto future = parameters_client->get_parameters({"robot_description"});
-  auto result = future.get();
-
-  std::string robot_description_;
-  if (!result.empty()) {
-    robot_description_ = result[0].value_to_string();
-  } else {
-    RCLCPP_ERROR(get_node()->get_logger(), "Failed to get robot_description parameter.");
+  const std::string robot_description_ =
+    fetch_robot_description(get_node(), get_robot_description());
+  if (robot_description_.empty()) {
+    RCLCPP_ERROR(get_node()->get_logger(), "Failed to get robot_description.");
     return CallbackReturn::ERROR;
   }
 

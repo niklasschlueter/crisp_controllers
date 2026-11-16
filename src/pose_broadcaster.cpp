@@ -5,6 +5,7 @@
 
 #include <Eigen/src/Core/Matrix.h>  // NOLINT(build/include_order)
 #include <crisp_controllers/pose_broadcaster.hpp>
+#include "crisp_controllers/utils/robot_description.hpp"
 #include "crisp_controllers/utils/ros2_version.hpp"
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
@@ -108,24 +109,10 @@ CallbackReturn PoseBroadcaster::on_init() {
 }
 
 CallbackReturn PoseBroadcaster::on_configure(const rclcpp_lifecycle::State & /*previous_state*/) {
-  std::string robot_description_ = get_robot_description();
+  const std::string robot_description_ =
+    fetch_robot_description(get_node(), get_robot_description());
   if (robot_description_.empty()) {
-    auto parameters_client = std::make_shared<rclcpp::AsyncParametersClient>(
-        get_node(), "robot_state_publisher");
-    if (parameters_client->wait_for_service(std::chrono::seconds(1))) {
-      auto future = parameters_client->get_parameters({"robot_description"});
-      if (future.wait_for(std::chrono::seconds(2)) == std::future_status::ready) {
-        auto result = future.get();
-        if (!result.empty()) {
-          robot_description_ = result[0].value_to_string();
-        }
-      }
-    }
-  }
-
-  if (robot_description_.empty()) {
-    RCLCPP_ERROR(get_node()->get_logger(),
-                 "Failed to get robot_description.");
+    RCLCPP_ERROR(get_node()->get_logger(), "Failed to get robot_description.");
     return CallbackReturn::ERROR;
   }
 
