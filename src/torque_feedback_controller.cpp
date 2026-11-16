@@ -79,7 +79,8 @@ controller_interface::return_type TorqueFeedbackController::update(
 
   // Compute nullspace control to maintain initial joint positions
   Eigen::VectorXd q_error = q_ - q_init_;
-  double nullspace_damping = params_.nullspace.damping > 0
+  // Negative (the default -1) derives damping from stiffness; 0 is an explicit zero.
+  double nullspace_damping = params_.nullspace.damping >= 0.0
     ? params_.nullspace.damping
     : 2.0 * sqrt(params_.nullspace.stiffness);
 
