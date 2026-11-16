@@ -137,6 +137,26 @@ CartesianController::update(const rclcpp::Time & time, const rclcpp::Duration & 
    * target_position_);*/
   end_effector_pose = data_.oMf[end_effector_frame_id];
 
+  if (!end_effector_pose.translation().allFinite() ||
+      !end_effector_pose.rotation().allFinite()) {
+    RCLCPP_ERROR_THROTTLE(
+      get_node()->get_logger(),
+      *get_node()->get_clock(),
+      1000,
+      "end_effector_pose contains NaN/Inf. "
+      "Holding previous torque command this cycle.");
+    if (!params_.stop_commands) {
+      for (size_t i = 0; i < params_.joints.size(); ++i) {
+#if ROS2_VERSION_ABOVE_HUMBLE
+        (void)command_interfaces_[i].set_value(tau_previous[i]);
+#else
+        command_interfaces_[i].set_value(tau_previous[i]);
+#endif
+      }
+    }
+    return controller_interface::return_type::OK;
+  }
+
   // We consider translation and rotation separately to avoid unatural screw
   // motions
   if (params_.use_local_jacobian) {
@@ -354,6 +374,16 @@ CartesianController::on_configure(const rclcpp_lifecycle::State & /*previous_sta
   }
 
   // Preallocate the matrices and vectors that will be used in the control loop
+  if (!model_.existFrame(params_.end_effector_frame)) {
+    RCLCPP_ERROR_STREAM(
+      get_node()->get_logger(),
+      "end_effector_frame '" << params_.end_effector_frame
+        << "' is not present in the robot model. Refusing to configure: "
+           "activating with an invalid frame results in undefined behavior "
+           "(out-of-bounds access into pinocchio::Data, manifesting as a "
+           "segfault or NaN/Inf in computed torques).");
+    return CallbackReturn::ERROR;
+  }
   end_effector_frame_id = model_.getFrameId(params_.end_effector_frame);
   q = Eigen::VectorXd::Zero(model_.nv);
   q_pin = Eigen::VectorXd::Zero(model_.nq);
@@ -428,14 +458,22 @@ CartesianController::on_configure(const rclcpp_lifecycle::State & /*previous_sta
   multiple_publishers_detected_ = false;
   max_allowed_publishers_ = 1;
 
+  const auto target_pose_topic =
+    params_.topics.target_pose.empty() ? "target_pose" : params_.topics.target_pose;
+  const auto target_joint_topic =
+    params_.topics.target_joint.empty() ? "target_joint" : params_.topics.target_joint;
+  const auto target_wrench_topic =
+    params_.topics.target_wrench.empty() ? "target_wrench" : params_.topics.target_wrench;
+
   auto target_pose_callback =
-    [this](const std::shared_ptr<geometry_msgs::msg::PoseStamped> msg) -> void {
-    if (!check_topic_publisher_count("target_pose")) {
+    [this, target_pose_topic](const std::shared_ptr<geometry_msgs::msg::PoseStamped> msg) -> void {
+    if (!check_topic_publisher_count(target_pose_topic)) {
       RCLCPP_WARN_THROTTLE(
         get_node()->get_logger(),
         *get_node()->get_clock(),
         1000,
-        "Ignoring target_pose message due to multiple publishers detected!");
+        "Ignoring message on '%s' due to multiple publishers detected!",
+        target_pose_topic.c_str());
       return;
     }
     // Record reception time so the RT update() loop can check pose age.
@@ -446,13 +484,15 @@ CartesianController::on_configure(const rclcpp_lifecycle::State & /*previous_sta
 
   // Copy of the joint list: update() reassigns params_ on the RT thread.
   auto target_joint_callback =
-    [this, joints = params_.joints](const std::shared_ptr<sensor_msgs::msg::JointState> msg) -> void {
-    if (!check_topic_publisher_count("target_joint")) {
+    [this, target_joint_topic, joints = params_.joints](
+      const std::shared_ptr<sensor_msgs::msg::JointState> msg) -> void {
+    if (!check_topic_publisher_count(target_joint_topic)) {
       RCLCPP_WARN_THROTTLE(
         get_node()->get_logger(),
         *get_node()->get_clock(),
         1000,
-        "Ignoring target_joint message due to multiple publishers detected!");
+        "Ignoring message on '%s' due to multiple publishers detected!",
+        target_joint_topic.c_str());
       return;
     }
     // Values are applied by position, so named messages must use our joint order.
@@ -469,13 +509,15 @@ CartesianController::on_configure(const rclcpp_lifecycle::State & /*previous_sta
   };
 
   auto target_wrench_callback =
-    [this](const std::shared_ptr<geometry_msgs::msg::WrenchStamped> msg) -> void {
-    if (!check_topic_publisher_count("target_wrench")) {
+    [this, target_wrench_topic](
+      const std::shared_ptr<geometry_msgs::msg::WrenchStamped> msg) -> void {
+    if (!check_topic_publisher_count(target_wrench_topic)) {
       RCLCPP_WARN_THROTTLE(
         get_node()->get_logger(),
         *get_node()->get_clock(),
         1000,
-        "Ignoring target_wrench message due to multiple publishers detected!");
+        "Ignoring message on '%s' due to multiple publishers detected!",
+        target_wrench_topic.c_str());
       return;
     }
     target_wrench_buffer_.writeFromNonRT(msg);
@@ -483,13 +525,13 @@ CartesianController::on_configure(const rclcpp_lifecycle::State & /*previous_sta
   };
 
   pose_sub_ = get_node()->create_subscription<geometry_msgs::msg::PoseStamped>(
-    "target_pose", rclcpp::QoS(1), target_pose_callback);
+    target_pose_topic, rclcpp::QoS(1), target_pose_callback);
 
   joint_sub_ = get_node()->create_subscription<sensor_msgs::msg::JointState>(
-    "target_joint", rclcpp::QoS(1), target_joint_callback);
+    target_joint_topic, rclcpp::QoS(1), target_joint_callback);
 
   wrench_sub_ = get_node()->create_subscription<geometry_msgs::msg::WrenchStamped>(
-    "target_wrench", rclcpp::QoS(1), target_wrench_callback);
+    target_wrench_topic, rclcpp::QoS(1), target_wrench_callback);
 
   // Velocity feedforward subscriber (only created if enabled — no cost when off).
   // The publisher is trusted to send the twist in the same frame as the Jacobian
@@ -655,10 +697,9 @@ void CartesianController::setStiffnessAndDamping() {
     weights[i] = params_.nullspace.weights.joints_map.at(params_.joints.at(i)).value;
   }
   nullspace_stiffness.diagonal() << params_.nullspace.stiffness * weights;
-  nullspace_damping.diagonal() << 2.0 * nullspace_stiffness.diagonal().cwiseSqrt();
 
-  // Negative damping (the default -1) means "derive from stiffness". Testing the
-  // double for truthiness took -1 literally: positive velocity feedback.
+  // Negative damping (the default -1) means "derive from stiffness"; 0 is an
+  // explicit zero, as the parameter description states.
   if (params_.nullspace.damping >= 0.0) {
     nullspace_damping.diagonal() = params_.nullspace.damping * weights;
   } else {
