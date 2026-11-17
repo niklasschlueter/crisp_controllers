@@ -227,6 +227,16 @@ if(BUILD_TESTING)
     Eigen3::Eigen
   )
 
+  ament_add_gtest(test_target_friction
+    tests/test_target_friction.cpp
+  )
+  target_include_directories(test_target_friction PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  )
+  target_link_libraries(test_target_friction
+    Eigen3::Eigen
+  )
+
   ament_add_gtest(test_joint_ordering
     tests/test_joint_ordering.cpp
   )

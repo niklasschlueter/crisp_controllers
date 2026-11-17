@@ -435,6 +435,55 @@ cartesian_controller:
       default_value: []
       description: "Sigmoidal+viscous model: velocity shift per joint [rad/s]."
 
+  friction_target:
+    # Friction compensation driven by the target joint velocity instead of the measured one
+    # (utils/target_friction.hpp): zero while the target rests, so it cannot drift, provided the
+    # target twist is exactly zero at rest (a twist differentiated from a jittery pose stream is
+    # not). Needs feedforward.velocity. Excludes use_friction (it would compensate twice).
+    # The friction values and the coupling are read at configure (a typo cannot act within one
+    # cycle); scale and stick.enabled are live.
+    scale:
+      type: double
+      default_value: 0.0
+      description: "Multiplier on the whole term; 0 = off. Ramp it while the target rests."
+      validation:
+        bounds<>: [0.0, 1.0]
+    kinetic:
+      type: double_array
+      default_value: []
+      description: "Kinetic (sliding) friction per drive [Nm], one entry per joint or empty. Read at configure."
+      validation:
+        lower_element_bounds<>: [0.0]
+        upper_element_bounds<>: [3.0]
+    velocity_epsilon:
+      type: double
+      default_value: 0.02
+      description: "Target drive velocity at which the push reaches 76 % of its amplitude [rad/s]. Smooths the sign flip at reversals."
+      validation:
+        gt<>: [0.0]
+    stick:
+      enabled:
+        type: bool
+        default_value: false
+        description: "While a drive is (nearly) at rest and its target moves, add breakaway - kinetic."
+      breakaway:
+        type: double_array
+        default_value: []
+        description: "Breakaway (static) friction per drive [Nm], one entry per joint or empty; entries <= kinetic disable the stick part on that drive. Read at configure."
+        validation:
+          lower_element_bounds<>: [0.0]
+          upper_element_bounds<>: [3.0]
+      velocity:
+        type: double
+        default_value: 0.05
+        description: "Drive velocity scale of the stick part, exp(-(v/velocity)^2) [rad/s]. Must lie above the velocity noise and well below the drives' slip speed, else the staircase only shifts ahead of the target."
+        validation:
+          gt<>: [0.0]
+    drive_coupling:
+      type: double_array
+      default_value: []
+      description: "Serial-to-drive velocity map A (nv*nv, row-major); drive torques map back as A^T. Empty = identity. Read at configure."
+
   variable_max_stiffness:
     translational:
       type: double

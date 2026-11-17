@@ -33,6 +33,7 @@
 #include "realtime_tools/realtime_buffer.hpp"
 #include <crisp_controllers/utils/friction_model.hpp>
 #include <crisp_controllers/utils/pose_safety.hpp>
+#include <crisp_controllers/utils/target_friction.hpp>
 
 using CallbackReturn = rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
 
@@ -269,6 +270,15 @@ private:
   FrictionModelType friction_model_type_ = FrictionModelType::kSignoidal;
   /** @brief Sigmoidal+viscous friction parameters of size nv */
   Eigen::VectorXd friction_f_v, friction_f_o, friction_f_c, friction_alpha, friction_ni;
+
+  /** @brief Serial-to-drive velocity map for friction_target (identity unless configured) */
+  Eigen::MatrixXd friction_target_coupling_;
+  /** @brief friction_target kinetic / breakaway per drive, fixed at configure (empty = unset) */
+  Eigen::VectorXd friction_target_kinetic_, friction_target_breakaway_;
+  /** @brief Target joint velocity J^+ dx_d, size nv */
+  Eigen::VectorXd dq_target_;
+  /** @brief Target-driven friction torque (friction_target), size nv */
+  Eigen::VectorXd tau_friction_target_;
 
   /** @brief Allowed type of joints **/
   const std::unordered_set<std::basic_string<char>> allowed_joint_types = {

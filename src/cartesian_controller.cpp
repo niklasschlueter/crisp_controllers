@@ -247,6 +247,26 @@ CartesianController::update(const rclcpp::Time & time, const rclcpp::Duration & 
     tau_friction.setZero();
   }
 
+  const auto & ft = params_.friction_target;
+  if (ft.scale > 0.0 && params_.use_friction) {
+    RCLCPP_ERROR_THROTTLE(get_node()->get_logger(), *get_node()->get_clock(), 5000,
+      "friction_target and use_friction are both on; friction_target is skipped so friction is "
+      "not compensated twice.");
+  }
+  if (ft.scale > 0.0 && !params_.use_friction) {
+    // Own damped pseudo-inverse: J_pinv is effectively undamped (nullspace.regularization), and
+    // near a singularity it would push hardest along the direction nothing else holds.
+    constexpr double kTargetVelocityRegularization = 1e-2;
+    dq_target_ = pseudo_inverse(J, kTargetVelocityRegularization) * dx_d_;
+    tau_friction_target_ = target_friction_torque(
+      dq_target_, dq, friction_target_coupling_, friction_target_kinetic_,
+      ft.stick.enabled ? friction_target_breakaway_ : Eigen::VectorXd(),
+      ft.velocity_epsilon, ft.stick.velocity, ft.scale);
+  } else {
+    dq_target_.setZero();
+    tau_friction_target_.setZero();
+  }
+
   if (params_.use_coriolis_compensation) {
     pinocchio::computeAllTerms(model_, data_, q_pin, dq);
     tau_coriolis = pinocchio::computeCoriolisMatrix(model_, data_, q_pin, dq) * dq;
@@ -260,8 +280,8 @@ CartesianController::update(const rclcpp::Time & time, const rclcpp::Duration & 
 
   tau_wrench << J.transpose() * target_wrench_;
 
-  tau_d << tau_task + tau_nullspace + tau_friction + tau_coriolis + tau_gravity + tau_joint_limits +
-      tau_wrench;
+  tau_d << tau_task + tau_nullspace + tau_friction + tau_friction_target_ + tau_coriolis +
+      tau_gravity + tau_joint_limits + tau_wrench;
 
   if (params_.limit_torques) {
     tau_d = saturateTorqueRate(tau_d, tau_previous, params_.max_delta_tau);
@@ -601,6 +621,37 @@ CartesianController::on_configure(const rclcpp_lifecycle::State & /*previous_sta
   tau_secondary = Eigen::VectorXd::Zero(model_.nv);
   tau_nullspace = Eigen::VectorXd::Zero(model_.nv);
   tau_friction = Eigen::VectorXd::Zero(model_.nv);
+  tau_friction_target_ = Eigen::VectorXd::Zero(model_.nv);
+  dq_target_ = Eigen::VectorXd::Zero(model_.nv);
+  {
+    params_ = params_listener_->get_params();  // a reconfigure picks up changed friction values
+    const auto & ft = params_.friction_target;
+    const auto nv = static_cast<size_t>(model_.nv);
+    const auto bad_size = [&](const std::vector<double> & v, size_t n, const char * name) {
+      if (v.empty() || v.size() == n) {return false;}
+      RCLCPP_ERROR(get_node()->get_logger(), "friction_target.%s must have %zu entries or be "
+        "empty, has %zu.", name, n, v.size());
+      return true;
+    };
+    if (bad_size(ft.kinetic, nv, "kinetic") || bad_size(ft.stick.breakaway, nv, "stick.breakaway") ||
+        bad_size(ft.drive_coupling, nv * nv, "drive_coupling")) {
+      return CallbackReturn::ERROR;
+    }
+    friction_target_kinetic_ = ft.kinetic.empty()
+      ? Eigen::VectorXd::Zero(model_.nv)
+      : Eigen::VectorXd(Eigen::Map<const Eigen::VectorXd>(ft.kinetic.data(), model_.nv));
+    friction_target_breakaway_ = ft.stick.breakaway.empty()
+      ? Eigen::VectorXd()
+      : Eigen::VectorXd(Eigen::Map<const Eigen::VectorXd>(ft.stick.breakaway.data(), model_.nv));
+    friction_target_coupling_ = ft.drive_coupling.empty()
+      ? Eigen::MatrixXd::Identity(model_.nv, model_.nv)
+      : Eigen::MatrixXd(Eigen::Map<const Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic,
+          Eigen::RowMajor>>(ft.drive_coupling.data(), model_.nv, model_.nv));
+    if (!ft.kinetic.empty() && !params_.feedforward.velocity.enabled) {
+      RCLCPP_WARN(get_node()->get_logger(), "friction_target has values but "
+        "feedforward.velocity is off: without a target twist it stays zero.");
+    }
+  }
   tau_coriolis = Eigen::VectorXd::Zero(model_.nv);
   tau_gravity = Eigen::VectorXd::Zero(model_.nv);
   tau_wrench = Eigen::VectorXd::Zero(model_.nv);
@@ -627,6 +678,9 @@ CartesianController::on_configure(const rclcpp_lifecycle::State & /*previous_sta
     for (int i = 0; i < tau_task.size(); ++i) {
       REGISTER_ROS2_CONTROL_INTROSPECTION("tau_task_" + std::to_string(i), &tau_task[i]);
       REGISTER_ROS2_CONTROL_INTROSPECTION("tau_desired_" + std::to_string(i), &tau_d[i]);
+      REGISTER_ROS2_CONTROL_INTROSPECTION(
+        "tau_friction_target_" + std::to_string(i), &tau_friction_target_[i]);
+      REGISTER_ROS2_CONTROL_INTROSPECTION("dq_target_" + std::to_string(i), &dq_target_[i]);
     }
     for (int i = 0; i < error.size(); ++i) {
       REGISTER_ROS2_CONTROL_INTROSPECTION("error_" + std::to_string(i), &error[i]);
