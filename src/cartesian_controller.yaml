@@ -434,6 +434,10 @@ cartesian_controller:
       type: double_array
       default_value: []
       description: "Sigmoidal+viscous model: velocity shift per joint [rad/s]."
+    drive_coupling:
+      type: double_array
+      default_value: []
+      description: "Optional serial-to-drive velocity map A (nv*nv, row-major); drive torques map back as A^T. Empty = identity."
 
   friction_target:
     # Friction compensation driven by the target joint velocity instead of the measured one
@@ -455,6 +459,13 @@ cartesian_controller:
       validation:
         lower_element_bounds<>: [0.0]
         upper_element_bounds<>: [3.0]
+    viscous:
+      type: double_array
+      default_value: []
+      description: "Viscous friction per drive [Nms/rad], one entry per joint or empty. Read at configure."
+      validation:
+        lower_element_bounds<>: [0.0]
+        upper_element_bounds<>: [5.0]
     velocity_epsilon:
       type: double
       default_value: 0.02

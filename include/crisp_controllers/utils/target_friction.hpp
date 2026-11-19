@@ -19,11 +19,11 @@
 
 #include <Eigen/Core>
 
-// breakaway may be empty: no stick part.
+// breakaway / viscous may be empty: no stick / viscous part.
 inline Eigen::VectorXd target_friction_torque(
   const Eigen::VectorXd & dq_target, const Eigen::VectorXd & dq, const Eigen::MatrixXd & coupling,
   const Eigen::VectorXd & kinetic, const Eigen::VectorXd & breakaway, double epsilon,
-  double stick_velocity, double scale) {
+  double stick_velocity, double scale, const Eigen::VectorXd & viscous = Eigen::VectorXd()) {
   const Eigen::VectorXd v_target = coupling * dq_target;
   const Eigen::VectorXd v = coupling * dq;
   Eigen::VectorXd tau_drive(v.size());
@@ -34,6 +34,9 @@ inline Eigen::VectorXd target_friction_torque(
       amplitude += std::max(breakaway[i] - kinetic[i], 0.0) * std::exp(-ratio * ratio);
     }
     tau_drive[i] = scale * amplitude * std::tanh(v_target[i] / epsilon);
+    if (viscous.size() == v.size()) {
+      tau_drive[i] += scale * viscous[i] * v[i];
+    }
   }
   return coupling.transpose() * tau_drive;
 }

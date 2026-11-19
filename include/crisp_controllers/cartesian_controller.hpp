@@ -271,10 +271,12 @@ private:
   /** @brief Sigmoidal+viscous friction parameters of size nv */
   Eigen::VectorXd friction_f_v, friction_f_o, friction_f_c, friction_alpha, friction_ni;
 
+  /** @brief Serial-to-drive velocity map for use_friction (identity unless configured) */
+  Eigen::MatrixXd friction_coupling_;
   /** @brief Serial-to-drive velocity map for friction_target (identity unless configured) */
   Eigen::MatrixXd friction_target_coupling_;
-  /** @brief friction_target kinetic / breakaway per drive, fixed at configure (empty = unset) */
-  Eigen::VectorXd friction_target_kinetic_, friction_target_breakaway_;
+  /** @brief friction_target kinetic / breakaway / viscous per drive, fixed at configure (empty = unset) */
+  Eigen::VectorXd friction_target_kinetic_, friction_target_breakaway_, friction_target_viscous_;
   /** @brief Target joint velocity J^+ dx_d, size nv */
   Eigen::VectorXd dq_target_;
   /** @brief Target-driven friction torque (friction_target), size nv */

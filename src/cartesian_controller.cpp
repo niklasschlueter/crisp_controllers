@@ -234,13 +234,14 @@ CartesianController::update(const rclcpp::Time & time, const rclcpp::Duration & 
     tau_nullspace.cwiseMin(params_.nullspace.max_tau).cwiseMax(-params_.nullspace.max_tau);
 
   if (params_.use_friction) {
+    const Eigen::VectorXd dq_drive = friction_coupling_ * dq;
     switch (friction_model_type_) {
       case FrictionModelType::kSignoidal:
-        tau_friction = get_friction(dq, fp1, fp2, fp3);
+        tau_friction = friction_coupling_.transpose() * get_friction(dq_drive, fp1, fp2, fp3);
         break;
       case FrictionModelType::kSigmoidalViscous:
-        tau_friction = get_friction_sigmoidal_viscous(
-          dq, friction_f_v, friction_f_o, friction_f_c, friction_alpha, friction_ni);
+        tau_friction = friction_coupling_.transpose() * get_friction_sigmoidal_viscous(
+          dq_drive, friction_f_v, friction_f_o, friction_f_c, friction_alpha, friction_ni);
         break;
     }
   } else {
@@ -261,7 +262,7 @@ CartesianController::update(const rclcpp::Time & time, const rclcpp::Duration & 
     tau_friction_target_ = target_friction_torque(
       dq_target_, dq, friction_target_coupling_, friction_target_kinetic_,
       ft.stick.enabled ? friction_target_breakaway_ : Eigen::VectorXd(),
-      ft.velocity_epsilon, ft.stick.velocity, ft.scale);
+      ft.velocity_epsilon, ft.stick.velocity, ft.scale, friction_target_viscous_);
   } else {
     dq_target_.setZero();
     tau_friction_target_.setZero();
@@ -634,15 +635,28 @@ CartesianController::on_configure(const rclcpp_lifecycle::State & /*previous_sta
       return true;
     };
     if (bad_size(ft.kinetic, nv, "kinetic") || bad_size(ft.stick.breakaway, nv, "stick.breakaway") ||
+        bad_size(ft.viscous, nv, "viscous") ||
         bad_size(ft.drive_coupling, nv * nv, "drive_coupling")) {
       return CallbackReturn::ERROR;
     }
+    if (!params_.friction.drive_coupling.empty() && params_.friction.drive_coupling.size() != nv * nv) {
+      RCLCPP_ERROR(get_node()->get_logger(), "friction.drive_coupling must have %zu entries or be empty, has %zu.",
+        nv * nv, params_.friction.drive_coupling.size());
+      return CallbackReturn::ERROR;
+    }
+    friction_coupling_ = params_.friction.drive_coupling.empty()
+      ? Eigen::MatrixXd::Identity(model_.nv, model_.nv)
+      : Eigen::MatrixXd(Eigen::Map<const Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic,
+          Eigen::RowMajor>>(params_.friction.drive_coupling.data(), model_.nv, model_.nv));
     friction_target_kinetic_ = ft.kinetic.empty()
       ? Eigen::VectorXd::Zero(model_.nv)
       : Eigen::VectorXd(Eigen::Map<const Eigen::VectorXd>(ft.kinetic.data(), model_.nv));
     friction_target_breakaway_ = ft.stick.breakaway.empty()
       ? Eigen::VectorXd()
       : Eigen::VectorXd(Eigen::Map<const Eigen::VectorXd>(ft.stick.breakaway.data(), model_.nv));
+    friction_target_viscous_ = ft.viscous.empty()
+      ? Eigen::VectorXd()
+      : Eigen::VectorXd(Eigen::Map<const Eigen::VectorXd>(ft.viscous.data(), model_.nv));
     friction_target_coupling_ = ft.drive_coupling.empty()
       ? Eigen::MatrixXd::Identity(model_.nv, model_.nv)
       : Eigen::MatrixXd(Eigen::Map<const Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic,
