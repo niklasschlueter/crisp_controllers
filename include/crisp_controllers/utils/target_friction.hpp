@@ -35,7 +35,7 @@ inline Eigen::VectorXd target_friction_torque(
     }
     tau_drive[i] = scale * amplitude * std::tanh(v_target[i] / epsilon);
     if (viscous.size() == v.size()) {
-      tau_drive[i] += scale * viscous[i] * v[i];
+      tau_drive[i] += scale * viscous[i] * v_target[i];
     }
   }
   return coupling.transpose() * tau_drive;
