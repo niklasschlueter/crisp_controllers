@@ -223,6 +223,10 @@ private:
   Eigen::MatrixXd stiffness = Eigen::MatrixXd::Zero(6, 6);
   /** @brief Cartesian damping matrix (6x6) */
   Eigen::MatrixXd damping = Eigen::MatrixXd::Zero(6, 6);
+  /** @brief Task-space integral gains [ki_pos(3), ki_rot(3)] */
+  Eigen::Matrix<double, 6, 1> ki_ = Eigen::Matrix<double, 6, 1>::Zero();
+  /** @brief Accumulated task-space integral error [pos(3), rot(3)] */
+  Eigen::Matrix<double, 6, 1> error_integral_ = Eigen::Matrix<double, 6, 1>::Zero();
   /** @brief Topic-provided stiffness matrix (6x6 diagonal) */
   Eigen::Matrix<double, 6, 6> topic_stiffness_ = Eigen::Matrix<double, 6, 6>::Zero();
 

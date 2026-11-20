@@ -68,7 +68,7 @@ CartesianController::state_interface_configuration() const {
 }
 
 controller_interface::return_type
-CartesianController::update(const rclcpp::Time & time, const rclcpp::Duration & /*period*/) {
+CartesianController::update(const rclcpp::Time & time, const rclcpp::Duration & period) {
   
   // Update current state information with EMA filtered values
   updateCurrentState();
@@ -205,14 +205,31 @@ CartesianController::update(const rclcpp::Time & time, const rclcpp::Duration & 
     return controller_interface::return_type::ERROR;
   }
 
+  // Task-space integral feedback with deadband and anti-windup clamping
+  const double dt = std::clamp(period.seconds(), 0.0, 0.05);
+  for (int i = 0; i < 6; ++i) {
+    if (ki_[i] <= 0.0) {
+      error_integral_[i] = 0.0;
+      continue;
+    }
+    const double deadband = (i < 3) ? params_.task.i_deadband_pos : params_.task.i_deadband_rot;
+    const double i_max = (i < 3) ? params_.task.i_max_pos : params_.task.i_max_rot;
+    if (std::abs(error[i]) > deadband) {
+      error_integral_[i] += error[i] * dt;
+    }
+    const double i_wrench = std::clamp(ki_[i] * error_integral_[i], -i_max, i_max);
+    error_integral_[i] = i_wrench / ki_[i];
+  }
+  const Eigen::Matrix<double, 6, 1> wrench_i = ki_.cwiseProduct(error_integral_);
+
   // PD+ form: damp the velocity error (J*dq - dx_d_), not the velocity itself.
   // dx_d_ is zero when feedforward is disabled or stale, so this collapses to
   // the standard impedance law in that case.
   const Eigen::Matrix<double, 6, 1> dx_err = J * dq - dx_d_;
   if (params_.use_operational_space) {
-    tau_task << J.transpose() * Mx * (stiffness * error - damping * dx_err);
+    tau_task << J.transpose() * Mx * (stiffness * error - damping * dx_err + wrench_i);
   } else {
-    tau_task << J.transpose() * (stiffness * error - damping * dx_err);
+    tau_task << J.transpose() * (stiffness * error - damping * dx_err + wrench_i);
   }
 
   if (model_.nq != model_.nv) {
@@ -757,6 +774,9 @@ void CartesianController::setStiffnessAndDamping() {
     (params_.task.d_rot_y > 0 ? params_.task.d_rot_y : 2.0 * std::sqrt(params_.task.k_rot_y)),
     (params_.task.d_rot_z > 0 ? params_.task.d_rot_z : 2.0 * std::sqrt(params_.task.k_rot_z));
 
+  ki_ << params_.task.ki_pos_x, params_.task.ki_pos_y, params_.task.ki_pos_z,
+    params_.task.ki_rot_x, params_.task.ki_rot_y, params_.task.ki_rot_z;
+
   nullspace_stiffness.setZero();
   nullspace_damping.setZero();
 
@@ -839,6 +859,7 @@ CartesianController::on_activate(const rclcpp_lifecycle::State & /*previous_stat
   last_twist_received_ns_.store(0, std::memory_order_relaxed);
   target_twist_.setZero();
   dx_d_.setZero();
+  error_integral_.setZero();
 
   // Seed the output EMA filter so the first update() cycle starts from the
   // correct torque rather than zero (or a stale value from a previous run).
