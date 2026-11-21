@@ -98,12 +98,23 @@ CartesianAdmittanceController::update(const rclcpp::Time & time, const rclcpp::D
   // target at the current end-effector position. This prevents the controller
   // from driving toward a stale goal when the sender crashes or the network drops.
   if (params_.pose_safety.timeout.enabled) {
-    apply_pose_timeout(
-      time, last_pose_received_ns_,
-      params_.pose_safety.timeout.seconds,
-      end_effector_pose,
-      target_position_, target_orientation_,
-      get_node()->get_logger(), get_node()->get_clock());
+    const pinocchio::SE3 & hold_pose =
+      (params_.command_mode == "position_velocity" && admittance_initialized_)
+        ? inner_SE3_
+        : end_effector_pose;
+    if (apply_pose_timeout(
+          time, last_pose_received_ns_,
+          params_.pose_safety.timeout.seconds,
+          hold_pose,
+          target_position_, target_orientation_,
+          get_node()->get_logger(), get_node()->get_clock())) {
+      if (params_.command_mode == "position_velocity") {
+        desired_position_ = target_position_;
+        desired_orientation_ = target_orientation_;
+        filter_twist_world_.setZero();
+        filter_accel_world_.setZero();
+      }
+    }
   }
   if (new_target_joint_) {
     parse_target_joint_();
