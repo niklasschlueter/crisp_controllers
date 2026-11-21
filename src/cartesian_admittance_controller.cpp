@@ -295,13 +295,12 @@ CartesianAdmittanceController::update(const rclcpp::Time & time, const rclcpp::D
       model_, data_, q_ik_pin_, end_effector_frame_id,
       pinocchio::ReferenceFrame::LOCAL_WORLD_ALIGNED, J);
 
-    // Metric-weight rotational rows by characteristic wrist length (0.10 m/rad) before
-    // damped SVD pseudoinverse so translational (m/rad) and rotational (rad/rad) singular
-    // values share consistent units and wrist alignment does not distort translation.
+    // Metric-weight rotational rows by characteristic wrist length (0.15 m/rad) and damp
+    // singular values (eps = 0.05) so near-singular arm configurations cannot trigger elbow flip.
     Eigen::Vector<double, 6> w_task;
-    w_task << 1.0, 1.0, 1.0, 0.10, 0.10, 0.10;
+    w_task << 1.0, 1.0, 1.0, 0.15, 0.15, 0.15;
     const Eigen::MatrixXd J_weighted = w_task.asDiagonal() * J;
-    J_pinv = pseudo_inverse(J_weighted, 1.5e-2) * w_task.asDiagonal();
+    J_pinv = pseudo_inverse(J_weighted, 5.0e-2) * w_task.asDiagonal();
 
     if (params_.nullspace.projector_type == "none") {
       nullspace_projection = Id_nv;
