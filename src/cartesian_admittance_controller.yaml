@@ -57,6 +57,12 @@ cartesian_admittance_controller:
       description: "Max allowed |q_ik - q_meas| [rad] to prevent IK windup against obstacles or limits."
       validation:
         bounds<>: [0.01, 2.0]
+    velocity_filter_alpha:
+      type: double
+      default_value: 0.92
+      description: "EMA smoothing factor (0..0.99) applied to dq_cmd before integrating q_ik += dq_cmd * dt, eliminating 100 Hz target_pose jitter for JTC-smooth JointPositionVelocity commands."
+      validation:
+        bounds<>: [0.0, 0.99]
 
   use_operational_space:
     type: bool

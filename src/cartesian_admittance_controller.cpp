@@ -113,6 +113,8 @@ CartesianAdmittanceController::update(const rclcpp::Time & time, const rclcpp::D
         desired_orientation_ = target_orientation_;
         filter_twist_world_.setZero();
         filter_accel_world_.setZero();
+        // Latch the timeout hold once so the arm still springs back when pushed while idle.
+        last_pose_received_ns_.store(0, std::memory_order_relaxed);
       }
     }
   }
@@ -329,13 +331,19 @@ CartesianAdmittanceController::update(const rclcpp::Time & time, const rclcpp::D
 
     const Eigen::Vector<double, 6> twist_cmd = inner_motion_ + ik_gain.cwiseProduct(error);
     const Eigen::VectorXd dq_null = params_.position_control.nullspace_gain * (q_ref - q_ik_);
-    dq_cmd_ = J_pinv * twist_cmd + nullspace_projection * dq_null;
+    Eigen::VectorXd dq_cmd_raw = J_pinv * twist_cmd + nullspace_projection * dq_null;
 
     const double max_vel = params_.position_control.max_joint_velocity;
-    const double max_abs_dq = dq_cmd_.cwiseAbs().maxCoeff();
+    const double max_abs_dq = dq_cmd_raw.cwiseAbs().maxCoeff();
     if (max_abs_dq > max_vel && max_abs_dq > 0.0) {
-      dq_cmd_ *= (max_vel / max_abs_dq);
+      dq_cmd_raw *= (max_vel / max_abs_dq);
     }
+
+    // Smooth dq_cmd before integrating q_ik so JointPositionVelocity receives a C2-smooth
+    // (q_ik, dq_cmd) stream free of 100 Hz target_pose arrival jitter.
+    dq_cmd_ = exponential_moving_average(
+      dq_cmd_, dq_cmd_raw, params_.position_control.velocity_filter_alpha);
+
     if (dt > 0.0) {
       const Eigen::VectorXd ddq_raw = (dq_cmd_ - dq_cmd_prev_) / dt;
       ddq_cmd_filtered_ = 0.70 * ddq_cmd_filtered_ + 0.30 * ddq_raw;
