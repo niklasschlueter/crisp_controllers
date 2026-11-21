@@ -279,6 +279,8 @@ private:
   Eigen::Vector<double, 6> inner_motion_;
   /** @brief First-cycle initialization flag for admittance state */
   bool admittance_initialized_;
+  /** @brief Elapsed time since activation [s], used to ramp in joint-effort wrench estimation */
+  double active_elapsed_s_ = 0.0;
   /** @brief Admittance virtual mass matrix (6x6 diagonal) */
   Eigen::Matrix<double, 6, 6> adm_mass_;
   /** @brief Inverse of admittance virtual mass matrix */

@@ -224,9 +224,16 @@ CartesianAdmittanceController::update(const rclcpp::Time & time, const rclcpp::D
   adm_error << adm_pos_error, adm_rot_error;
 
   // 9. Obtain external wrench in LOCAL_WORLD_ALIGNED frame
+  active_elapsed_s_ += dt;
   Eigen::Vector<double, 6> ft_wrench_world;
   if (params_.ft_sensor.use_joint_effort) {
     ft_wrench_world = estimateExternalWrenchWorld();
+    // Smoothly ramp in effort-based wrench after a 0.5 s settle window so the initial
+    // JointPositionVelocity gravity-sag transient at controller switch never excites admittance.
+    constexpr double kSettleTime = 0.5;
+    constexpr double kRampTime = 0.5;
+    const double ramp = std::clamp((active_elapsed_s_ - kSettleTime) / kRampTime, 0.0, 1.0);
+    ft_wrench_world *= ramp;
   } else {
     pinocchio::SE3 ft_sensor_pose = data_.oMf[ft_sensor_frame_id];
     pinocchio::Force ft_local(ft_wrench_.head(3), ft_wrench_.tail(3));
@@ -1050,6 +1057,7 @@ CartesianAdmittanceController::on_activate(const rclcpp_lifecycle::State & /*pre
 
   // Reset admittance state so it reinitializes on first update cycle
   admittance_initialized_ = false;
+  active_elapsed_s_ = 0.0;
   inner_motion_.setZero();
   filter_twist_world_.setZero();
   filter_accel_world_.setZero();
