@@ -177,6 +177,16 @@ private:
    */
   void parse_target_adm_stiffness_();
 
+  /**
+   * @brief Compute joint friction torque using the configured friction model (and optional drive coupling)
+   */
+  Eigen::VectorXd computeFrictionTorque(const Eigen::VectorXd & vel) const;
+
+  /**
+   * @brief Estimate external Cartesian wrench (LOCAL_WORLD_ALIGNED) from joint effort state interfaces
+   */
+  Eigen::Vector<double, 6> estimateExternalWrenchWorld();
+
   // ---- Flags for new data ----
   bool new_target_pose_;
   bool new_target_joint_;
@@ -220,6 +230,14 @@ private:
   Eigen::Vector3d desired_position_;
   /** @brief Desired target orientation as quaternion after applying filtering */
   Eigen::Quaterniond desired_orientation_;
+  /** @brief Internal 2nd-order critically-damped pose filter velocity in LOCAL_WORLD_ALIGNED frame */
+  Eigen::Vector<double, 6> filter_twist_world_ = Eigen::Vector<double, 6>::Zero();
+  /** @brief Internal 2nd-order critically-damped pose filter acceleration in LOCAL_WORLD_ALIGNED frame */
+  Eigen::Vector<double, 6> filter_accel_world_ = Eigen::Vector<double, 6>::Zero();
+  /** @brief Previous commanded joint velocity for acceleration feedforward in RNEA */
+  Eigen::VectorXd dq_cmd_prev_;
+  /** @brief Filtered commanded joint acceleration for RNEA external wrench estimation */
+  Eigen::VectorXd ddq_cmd_filtered_;
 
   // ---- Parameters ----
 
@@ -288,6 +306,20 @@ private:
   Eigen::VectorXd dq_ref;
   /** @brief Target joint positions for posture task */
   Eigen::VectorXd q_target;
+  /** @brief Measured joint efforts (when ft_sensor.use_joint_effort is enabled) */
+  Eigen::VectorXd tau_meas_;
+  /** @brief Internal CLIK joint position state (when command_mode == 'position_velocity') */
+  Eigen::VectorXd q_ik_;
+  /** @brief Pinocchio-formatted CLIK joint position state */
+  Eigen::VectorXd q_ik_pin_;
+  /** @brief Commanded joint velocity from CLIK */
+  Eigen::VectorXd dq_cmd_;
+  /** @brief Filtered joint-effort-based external wrench in LOCAL_WORLD_ALIGNED */
+  Eigen::Vector<double, 6> ft_wrench_filtered_ = Eigen::Vector<double, 6>::Zero();
+  /** @brief Optional nv x nv drive coupling matrix for friction estimation/compensation */
+  Eigen::MatrixXd friction_drive_coupling_;
+  /** @brief Whether friction_drive_coupling_ is configured */
+  bool has_drive_coupling_ = false;
 
   /** @brief Previously computed torque */
   Eigen::VectorXd tau_previous;

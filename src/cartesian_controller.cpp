@@ -50,6 +50,23 @@ CartesianController::command_interface_configuration() const {
   for (const auto & joint_name : params_.joints) {
     config.names.push_back(joint_name + "/effort");
   }
+  if (params_.onboard_pid.enabled) {
+    for (const auto & joint_name : params_.joints) {
+      config.names.push_back(joint_name + "/position");
+    }
+    for (const auto & joint_name : params_.joints) {
+      config.names.push_back(joint_name + "/velocity");
+    }
+    for (const auto & joint_name : params_.joints) {
+      config.names.push_back(joint_name + "/p_gain");
+    }
+    for (const auto & joint_name : params_.joints) {
+      config.names.push_back(joint_name + "/i_gain");
+    }
+    for (const auto & joint_name : params_.joints) {
+      config.names.push_back(joint_name + "/d_gain");
+    }
+  }
   return config;
 }
 
@@ -106,8 +123,10 @@ CartesianController::update(const rclcpp::Time & time, const rclcpp::Duration & 
   }
 
   // Velocity feedforward (PD+): consume the latest twist and apply a watchdog.
-  // When disabled or stale, dx_d_ stays zero and the torque law below collapses
-  // to the standard impedance form.
+  // When disabled or stale, dx_d_ falls back to the 2nd-order reference filter twist
+  // (when filter.pose_natural_freq > 0) or zero.
+  const double dt = std::clamp(period.seconds(), 0.0, 0.05);
+  bool has_external_twist = false;
   if (params_.feedforward.velocity.enabled) {
     if (new_target_twist_) {
       parse_target_twist_();
@@ -118,9 +137,12 @@ CartesianController::update(const rclcpp::Time & time, const rclcpp::Duration & 
     const double age_s = (last_ns == 0)
       ? std::numeric_limits<double>::infinity()
       : (now_ns - last_ns) * 1e-9;
-    dx_d_ = (age_s > params_.feedforward.velocity.timeout_seconds)
-      ? Eigen::Matrix<double, 6, 1>::Zero()
-      : target_twist_;
+    if (age_s <= params_.feedforward.velocity.timeout_seconds) {
+      dx_d_ = target_twist_;
+      has_external_twist = true;
+    } else {
+      dx_d_.setZero();
+    }
   } else {
     dx_d_.setZero();
   }
@@ -128,10 +150,30 @@ CartesianController::update(const rclcpp::Time & time, const rclcpp::Duration & 
   pinocchio::forwardKinematics(model_, data_, q_pin, dq);
   pinocchio::updateFramePlacements(model_, data_);
 
-  desired_position_ =
-    exponential_moving_average(desired_position_, target_position_, params_.filter.target_pose);
-  desired_orientation_ =
-    target_orientation_.slerp(params_.filter.target_pose, desired_orientation_);
+  if (params_.filter.pose_natural_freq > 0.0 && dt > 0.0) {
+    const double wn = 2.0 * M_PI * params_.filter.pose_natural_freq;
+    const double a = wn * dt;
+    const double E = std::exp(-a);
+
+    const Eigen::Vector3d pos_err = target_position_ - desired_position_;
+    const Eigen::Vector3d v0 = filter_twist_world_.head(3);
+    desired_position_ = target_position_ - E * ((1.0 + a) * pos_err - dt * v0);
+    filter_twist_world_.head(3) = E * (wn * wn * dt * pos_err + (1.0 - a) * v0);
+
+    const Eigen::Matrix3d R_des = desired_orientation_.toRotationMatrix();
+    const Eigen::Matrix3d R_tgt = target_orientation_.toRotationMatrix();
+    const Eigen::Vector3d rot_err = pinocchio::log3(R_tgt * R_des.transpose());
+    const Eigen::Vector3d w0 = filter_twist_world_.tail(3);
+    filter_twist_world_.tail(3) = E * (wn * wn * dt * rot_err + (1.0 - a) * w0);
+    const Eigen::Vector3d delta_r = rot_err - E * ((1.0 + a) * rot_err - dt * w0);
+    desired_orientation_ = Eigen::Quaterniond(pinocchio::exp3(delta_r) * R_des).normalized();
+  } else {
+    desired_position_ =
+      exponential_moving_average(desired_position_, target_position_, params_.filter.target_pose);
+    desired_orientation_ =
+      target_orientation_.slerp(params_.filter.target_pose, desired_orientation_);
+    filter_twist_world_.setZero();
+  }
 
   /*target_pose_ = pinocchio::SE3(target_orientation_.toRotationMatrix(),
    * target_position_);*/
@@ -146,15 +188,34 @@ CartesianController::update(const rclcpp::Time & time, const rclcpp::Duration & 
       "end_effector_pose contains NaN/Inf. "
       "Holding previous torque command this cycle.");
     if (!params_.stop_commands) {
-      for (size_t i = 0; i < params_.joints.size(); ++i) {
+      const size_t num_joints = params_.joints.size();
+      for (size_t i = 0; i < num_joints; ++i) {
 #if ROS2_VERSION_ABOVE_HUMBLE
         (void)command_interfaces_[i].set_value(tau_previous[i]);
+        if (params_.onboard_pid.enabled) {
+          (void)command_interfaces_[num_joints + i].set_value(q[i]);
+          (void)command_interfaces_[2 * num_joints + i].set_value(0.0);
+        }
 #else
         command_interfaces_[i].set_value(tau_previous[i]);
+        if (params_.onboard_pid.enabled) {
+          command_interfaces_[num_joints + i].set_value(q[i]);
+          command_interfaces_[2 * num_joints + i].set_value(0.0);
+        }
 #endif
       }
     }
     return controller_interface::return_type::OK;
+  }
+
+  if (!has_external_twist && params_.filter.pose_natural_freq > 0.0) {
+    if (params_.use_local_jacobian) {
+      const Eigen::Matrix3d R_T = end_effector_pose.rotation().transpose();
+      dx_d_.head(3) = R_T * filter_twist_world_.head(3);
+      dx_d_.tail(3) = R_T * filter_twist_world_.tail(3);
+    } else {
+      dx_d_ = filter_twist_world_;
+    }
   }
 
   // We consider translation and rotation separately to avoid unatural screw
@@ -206,7 +267,6 @@ CartesianController::update(const rclcpp::Time & time, const rclcpp::Duration & 
   }
 
   // Task-space integral feedback with deadband and anti-windup clamping
-  const double dt = std::clamp(period.seconds(), 0.0, 0.05);
   for (int i = 0; i < 6; ++i) {
     if (ki_[i] <= 0.0) {
       error_integral_[i] = 0.0;
@@ -307,11 +367,44 @@ CartesianController::update(const rclcpp::Time & time, const rclcpp::Duration & 
   tau_d = exponential_moving_average(tau_previous, tau_d, params_.filter.output_torque);
 
   if (!params_.stop_commands) {
-    for (size_t i = 0; i < params_.joints.size(); ++i) {
+    const size_t num_joints = params_.joints.size();
+    Eigen::VectorXd q_onboard = q;
+    Eigen::VectorXd dq_onboard;
+    if (params_.onboard_pid.enabled) {
+      constexpr double kOnboardVelocityRegularization = 1.5e-2;
+      Eigen::Matrix<double, 6, 1> w_task;
+      w_task << 1.0, 1.0, 1.0, 0.10, 0.10, 0.10;
+      const Eigen::MatrixXd J_pinv_w =
+        pseudo_inverse(w_task.asDiagonal() * J, kOnboardVelocityRegularization) * w_task.asDiagonal();
+      Eigen::Matrix<double, 6, 1> err_micro = error.cwiseMax(-0.008).cwiseMin(0.008);
+      err_micro.tail<3>().setZero();
+      q_onboard = q + J_pinv_w * err_micro;
+      const Eigen::Matrix<double, 6, 1> v_task =
+        dx_d_ + params_.onboard_pid.velocity_error_gain * err_micro;
+      dq_onboard = J_pinv_w * v_task;
+    }
+    for (size_t i = 0; i < num_joints; ++i) {
+      const double kp = (i < params_.onboard_pid.p_gains.size()) ? params_.onboard_pid.p_gains[i] : 0.0;
+      const double ki = (i < params_.onboard_pid.i_gains.size()) ? params_.onboard_pid.i_gains[i] : 0.0;
+      const double kd = (i < params_.onboard_pid.d_gains.size()) ? params_.onboard_pid.d_gains[i] : 0.0;
 #if ROS2_VERSION_ABOVE_HUMBLE
       (void)command_interfaces_[i].set_value(tau_d[i]);
+      if (params_.onboard_pid.enabled) {
+        (void)command_interfaces_[num_joints + i].set_value(q_onboard[i]);
+        (void)command_interfaces_[2 * num_joints + i].set_value(dq_onboard[i]);
+        (void)command_interfaces_[3 * num_joints + i].set_value(kp);
+        (void)command_interfaces_[4 * num_joints + i].set_value(ki);
+        (void)command_interfaces_[5 * num_joints + i].set_value(kd);
+      }
 #else
       command_interfaces_[i].set_value(tau_d[i]);
+      if (params_.onboard_pid.enabled) {
+        command_interfaces_[num_joints + i].set_value(q_onboard[i]);
+        command_interfaces_[2 * num_joints + i].set_value(dq_onboard[i]);
+        command_interfaces_[3 * num_joints + i].set_value(kp);
+        command_interfaces_[4 * num_joints + i].set_value(ki);
+        command_interfaces_[5 * num_joints + i].set_value(kd);
+      }
 #endif
     }
   }
@@ -859,7 +952,28 @@ CartesianController::on_activate(const rclcpp_lifecycle::State & /*previous_stat
   last_twist_received_ns_.store(0, std::memory_order_relaxed);
   target_twist_.setZero();
   dx_d_.setZero();
+  filter_twist_world_.setZero();
   error_integral_.setZero();
+
+  has_saved_pid_gains_ = false;
+  if (params_.onboard_pid.enabled) {
+    const size_t num_joints = params_.joints.size();
+    prev_p_gains_.resize(num_joints);
+    prev_i_gains_.resize(num_joints);
+    prev_d_gains_.resize(num_joints);
+    for (size_t i = 0; i < num_joints; ++i) {
+#if ROS2_VERSION_ABOVE_HUMBLE
+      prev_p_gains_[i] = command_interfaces_[3 * num_joints + i].get_optional().value_or(600.0);
+      prev_i_gains_[i] = command_interfaces_[4 * num_joints + i].get_optional().value_or(0.5);
+      prev_d_gains_[i] = command_interfaces_[5 * num_joints + i].get_optional().value_or(20.0);
+#else
+      prev_p_gains_[i] = command_interfaces_[3 * num_joints + i].get_value();
+      prev_i_gains_[i] = command_interfaces_[4 * num_joints + i].get_value();
+      prev_d_gains_[i] = command_interfaces_[5 * num_joints + i].get_value();
+#endif
+    }
+    has_saved_pid_gains_ = true;
+  }
 
   // Seed the output EMA filter so the first update() cycle starts from the
   // correct torque rather than zero (or a stale value from a previous run).
@@ -877,6 +991,20 @@ CartesianController::on_activate(const rclcpp_lifecycle::State & /*previous_stat
 
 controller_interface::CallbackReturn
 CartesianController::on_deactivate(const rclcpp_lifecycle::State & /*previous_state*/) {
+  if (params_.onboard_pid.enabled && has_saved_pid_gains_) {
+    const size_t num_joints = params_.joints.size();
+    for (size_t i = 0; i < num_joints; ++i) {
+#if ROS2_VERSION_ABOVE_HUMBLE
+      (void)command_interfaces_[3 * num_joints + i].set_value(prev_p_gains_[i]);
+      (void)command_interfaces_[4 * num_joints + i].set_value(prev_i_gains_[i]);
+      (void)command_interfaces_[5 * num_joints + i].set_value(prev_d_gains_[i]);
+#else
+      command_interfaces_[3 * num_joints + i].set_value(prev_p_gains_[i]);
+      command_interfaces_[4 * num_joints + i].set_value(prev_i_gains_[i]);
+      command_interfaces_[5 * num_joints + i].set_value(prev_d_gains_[i]);
+#endif
+    }
+  }
   return CallbackReturn::SUCCESS;
 }
 

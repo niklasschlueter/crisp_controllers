@@ -47,8 +47,17 @@ controller_interface::InterfaceConfiguration
 CartesianAdmittanceController::command_interface_configuration() const {
   controller_interface::InterfaceConfiguration config;
   config.type = controller_interface::interface_configuration_type::INDIVIDUAL;
-  for (const auto & joint_name : params_.joints) {
-    config.names.push_back(joint_name + "/effort");
+  if (params_.command_mode == "position_velocity") {
+    for (const auto & joint_name : params_.joints) {
+      config.names.push_back(joint_name + "/position");
+    }
+    for (const auto & joint_name : params_.joints) {
+      config.names.push_back(joint_name + "/velocity");
+    }
+  } else {
+    for (const auto & joint_name : params_.joints) {
+      config.names.push_back(joint_name + "/effort");
+    }
   }
   return config;
 }
@@ -63,6 +72,11 @@ CartesianAdmittanceController::state_interface_configuration() const {
   }
   for (const auto & joint_name : params_.joints) {
     config.names.push_back(joint_name + "/velocity");
+  }
+  if (params_.ft_sensor.use_joint_effort) {
+    for (const auto & joint_name : params_.joints) {
+      config.names.push_back(joint_name + "/effort");
+    }
   }
   return config;
 }
@@ -132,12 +146,25 @@ CartesianAdmittanceController::update(const rclcpp::Time & time, const rclcpp::D
       "end_effector_pose contains NaN/Inf. "
       "Holding previous torque command this cycle.");
     if (!params_.stop_commands) {
-      for (size_t i = 0; i < params_.joints.size(); ++i) {
+      const size_t num_joints = params_.joints.size();
+      if (params_.command_mode == "position_velocity") {
+        for (size_t i = 0; i < num_joints; ++i) {
 #if ROS2_VERSION_ABOVE_HUMBLE
-        (void)command_interfaces_[i].set_value(tau_previous[i]);
+          (void)command_interfaces_[i].set_value(q_ik_[i]);
+          (void)command_interfaces_[num_joints + i].set_value(0.0);
 #else
-        command_interfaces_[i].set_value(tau_previous[i]);
+          command_interfaces_[i].set_value(q_ik_[i]);
+          command_interfaces_[num_joints + i].set_value(0.0);
 #endif
+        }
+      } else {
+        for (size_t i = 0; i < num_joints; ++i) {
+#if ROS2_VERSION_ABOVE_HUMBLE
+          (void)command_interfaces_[i].set_value(tau_previous[i]);
+#else
+          command_interfaces_[i].set_value(tau_previous[i]);
+#endif
+        }
       }
     }
     return controller_interface::return_type::OK;
@@ -150,11 +177,35 @@ CartesianAdmittanceController::update(const rclcpp::Time & time, const rclcpp::D
     admittance_initialized_ = true;
   }
 
-  // 7. Compute admittance target pose from desired (same EMA filtering as CartesianController)
-  desired_position_ =
-    exponential_moving_average(desired_position_, target_position_, params_.filter.target_pose);
-  desired_orientation_ =
-    target_orientation_.slerp(params_.filter.target_pose, desired_orientation_);
+  // 7. Compute admittance target pose (2nd-order critically-damped filter or 1st-order EMA)
+  const double dt = std::clamp(period.seconds(), 0.0, 0.05);
+  if (params_.filter.pose_natural_freq > 0.0 && dt > 0.0) {
+    const double wn = 2.0 * M_PI * params_.filter.pose_natural_freq;
+    const double a = wn * dt;
+    const double E = std::exp(-a);
+
+    const Eigen::Vector3d pos_err = target_position_ - desired_position_;
+    const Eigen::Vector3d v0 = filter_twist_world_.head(3);
+    filter_accel_world_.head(3) = (wn * wn) * pos_err - 2.0 * wn * v0;
+    desired_position_ = target_position_ - E * ((1.0 + a) * pos_err - dt * v0);
+    filter_twist_world_.head(3) = E * (wn * wn * dt * pos_err + (1.0 - a) * v0);
+
+    const Eigen::Matrix3d R_des = desired_orientation_.toRotationMatrix();
+    const Eigen::Matrix3d R_tgt = target_orientation_.toRotationMatrix();
+    const Eigen::Vector3d rot_err = pinocchio::log3(R_tgt * R_des.transpose());
+    const Eigen::Vector3d w0 = filter_twist_world_.tail(3);
+    filter_accel_world_.tail(3) = (wn * wn) * rot_err - 2.0 * wn * w0;
+    filter_twist_world_.tail(3) = E * (wn * wn * dt * rot_err + (1.0 - a) * w0);
+    const Eigen::Vector3d delta_r = rot_err - E * ((1.0 + a) * rot_err - dt * w0);
+    desired_orientation_ = Eigen::Quaterniond(pinocchio::exp3(delta_r) * R_des).normalized();
+  } else {
+    desired_position_ =
+      exponential_moving_average(desired_position_, target_position_, params_.filter.target_pose);
+    desired_orientation_ =
+      target_orientation_.slerp(params_.filter.target_pose, desired_orientation_);
+    filter_twist_world_.setZero();
+    filter_accel_world_.setZero();
+  }
 
   // 8. Compute SE3 error between inner state and desired pose (on manifold)
   // Build desired SE3 from filtered position and orientation
@@ -172,22 +223,27 @@ CartesianAdmittanceController::update(const rclcpp::Time & time, const rclcpp::D
   Eigen::Vector<double, 6> adm_error;
   adm_error << adm_pos_error, adm_rot_error;
 
-  // 9. Transform F/T wrench from sensor (LOCAL) frame to LOCAL_WORLD_ALIGNED frame
-  pinocchio::SE3 ft_sensor_pose = data_.oMf[ft_sensor_frame_id];
-  pinocchio::Force ft_local(ft_wrench_.head(3), ft_wrench_.tail(3));
-  pinocchio::Force ft_world = pinocchio::Force::Zero();
-  pinocchio::changeReferenceFrame(
-    ft_sensor_pose, ft_local, pinocchio::LOCAL, pinocchio::LOCAL_WORLD_ALIGNED, ft_world);
-  Eigen::Vector<double, 6> ft_wrench_world = ft_world.toVector();
+  // 9. Obtain external wrench in LOCAL_WORLD_ALIGNED frame
+  Eigen::Vector<double, 6> ft_wrench_world;
+  if (params_.ft_sensor.use_joint_effort) {
+    ft_wrench_world = estimateExternalWrenchWorld();
+  } else {
+    pinocchio::SE3 ft_sensor_pose = data_.oMf[ft_sensor_frame_id];
+    pinocchio::Force ft_local(ft_wrench_.head(3), ft_wrench_.tail(3));
+    pinocchio::Force ft_world = pinocchio::Force::Zero();
+    pinocchio::changeReferenceFrame(
+      ft_sensor_pose, ft_local, pinocchio::LOCAL, pinocchio::LOCAL_WORLD_ALIGNED, ft_world);
+    ft_wrench_world = ft_world.toVector();
+  }
 
-  // 10. Admittance dynamics: accel = M_inv * (F_ext - D * vel + K * error)
+  // 10. Admittance dynamics: accel = accel_ref + M_inv * (F_ext + D * (vel_ref - vel) + K * error)
   // Spring term +K*(desired - inner) is a restoring force toward the desired pose
   Eigen::Matrix<double, 6, 6> K_adm = use_topic_adm_stiffness_ ? topic_adm_stiffness_ : adm_stiffness_;
-  Eigen::Vector<double, 6> adm_force = ft_wrench_world - adm_damping_ * inner_motion_ + K_adm * adm_error;
-  Eigen::Vector<double, 6> accel = adm_mass_inv_ * adm_force;
+  Eigen::Vector<double, 6> adm_force =
+    ft_wrench_world + adm_damping_ * (filter_twist_world_ - inner_motion_) + K_adm * adm_error;
+  Eigen::Vector<double, 6> accel = filter_accel_world_ + adm_mass_inv_ * adm_force;
 
   // 10. Semi-implicit Euler integration of the admittance target
-  double dt = period.seconds();
   inner_motion_ += accel * dt;
   if (params_.coupled_se3_integration) {
     // Legacy: exp6 left-multiply couples translation and rotation.
@@ -200,129 +256,210 @@ CartesianAdmittanceController::update(const rclcpp::Time & time, const rclcpp::D
       (pinocchio::exp3(Eigen::Vector3d(inner_motion_.tail(3) * dt)) * inner_SE3_.rotation()).eval();
   }
 
-  // 11. Use inner_SE3_ as the desired for impedance outer loop
-  // Compute impedance error (same as CartesianController but using inner_SE3_ as target)
-  if (params_.use_local_jacobian) {
-    error.head(3) = end_effector_pose.rotation().transpose() *
-      (inner_SE3_.translation() - end_effector_pose.translation());
-    error.tail(3) =
-      pinocchio::log3(end_effector_pose.rotation().transpose() * inner_SE3_.rotation());
-  } else {
-    error.head(3) = inner_SE3_.translation() - end_effector_pose.translation();
-    error.tail(3) =
-      pinocchio::log3(inner_SE3_.rotation() * end_effector_pose.rotation().transpose());
-  }
-
-  // 12. Error clipping (same as CartesianController)
-  if (params_.limit_error) {
-    max_delta_ << params_.task.error_clip.x, params_.task.error_clip.y, params_.task.error_clip.z,
-      params_.task.error_clip.rx, params_.task.error_clip.ry, params_.task.error_clip.rz;
-    error = error.cwiseMax(-max_delta_).cwiseMin(max_delta_);
-  }
-
-  // 13. Jacobian, pseudo-inverse, nullspace, Mx computation (same as CartesianController)
-  J.setZero();
-  auto reference_frame = params_.use_local_jacobian
-    ? pinocchio::ReferenceFrame::LOCAL
-    : pinocchio::ReferenceFrame::LOCAL_WORLD_ALIGNED;
-  pinocchio::computeFrameJacobian(model_, data_, q_pin, end_effector_frame_id, reference_frame, J);
-
-  J_pinv = pseudo_inverse(J, params_.nullspace.regularization);
-  if (params_.nullspace.projector_type == "dynamic" || params_.use_operational_space) {
-    pinocchio::computeMinverse(model_, data_, q_pin);
-    data_.Minv.triangularView<Eigen::StrictlyLower>() =
-      data_.Minv.transpose().triangularView<Eigen::StrictlyLower>();
-    Mx_inv = J * data_.Minv * J.transpose();
-    Mx = pseudo_inverse(Mx_inv, params_.operational_space_regularization);
-  }
-
-  if (params_.nullspace.projector_type == "dynamic") {
-    auto J_bar = data_.Minv * J.transpose() * Mx;
-    nullspace_projection = Id_nv - J.transpose() * J_bar.transpose();
-  } else if (params_.nullspace.projector_type == "kinematic") {
-    nullspace_projection = Id_nv - J_pinv * J;
-  } else if (params_.nullspace.projector_type == "none") {
-    nullspace_projection = Eigen::MatrixXd::Identity(model_.nv, model_.nv);
-  } else {
-    RCLCPP_ERROR_STREAM_ONCE(
-      get_node()->get_logger(),
-      "Unknown nullspace projector type: " << params_.nullspace.projector_type);
-    return controller_interface::return_type::ERROR;
-  }
-
-  // 14. Task torque (impedance): tau_task = J^T * (K * error - D * J * dq) or J^T * Mx * (...)
-  if (params_.use_operational_space) {
-    tau_task << J.transpose() * Mx * (stiffness * error - damping * (J * dq));
-  } else {
-    tau_task << J.transpose() * (stiffness * error - damping * (J * dq));
-  }
-
-  // 15. All compensation torques (same as CartesianController)
-  if (model_.nq != model_.nv) {
-    tau_joint_limits = Eigen::VectorXd::Zero(model_.nv);
-  } else {
-    tau_joint_limits = get_joint_limit_torque(
-      q,
-      model_.lowerPositionLimit,
-      model_.upperPositionLimit,
-      params_.joint_limit_repulsion.safe_range,
-      params_.joint_limit_repulsion.max_torque);
-  }
-
-  tau_secondary << nullspace_stiffness * (q_ref - q) + nullspace_damping * (dq_ref - dq);
-
-  tau_nullspace << nullspace_projection * tau_secondary;
-  tau_nullspace =
-    tau_nullspace.cwiseMin(params_.nullspace.max_tau).cwiseMax(-params_.nullspace.max_tau);
-
-  if (params_.use_friction) {
-    switch (friction_model_type_) {
-      case FrictionModelType::kSignoidal:
-        tau_friction = get_friction(dq, fp1, fp2, fp3);
-        break;
-      case FrictionModelType::kSigmoidalViscous:
-        tau_friction = get_friction_sigmoidal_viscous(
-          dq, friction_f_v, friction_f_o, friction_f_c, friction_alpha, friction_ni);
-        break;
+  // 11. Outer loop: either position+velocity (CLIK) or effort (Cartesian impedance)
+  if (params_.command_mode == "position_velocity") {
+    const size_t num_joints = params_.joints.size();
+    for (size_t i = 0; i < num_joints; ++i) {
+      const auto joint_id = model_.getJointId(params_.joints[i]);
+      const auto joint = model_.joints[joint_id];
+      if (continous_joint_types.count(joint.shortname())) {
+        q_ik_pin_[joint.idx_q()] = std::cos(q_ik_[i]);
+        q_ik_pin_[joint.idx_q() + 1] = std::sin(q_ik_[i]);
+      } else {
+        q_ik_pin_[joint.idx_q()] = q_ik_[i];
+      }
     }
-  } else {
-    tau_friction.setZero();
-  }
 
-  if (params_.use_coriolis_compensation) {
-    pinocchio::computeAllTerms(model_, data_, q_pin, dq);
-    tau_coriolis = pinocchio::computeCoriolisMatrix(model_, data_, q_pin, dq) * dq;
-  } else {
-    tau_coriolis = Eigen::VectorXd::Zero(model_.nv);
-  }
+    pinocchio::forwardKinematics(model_, data_, q_ik_pin_, dq_cmd_);
+    pinocchio::updateFramePlacements(model_, data_);
+    const pinocchio::SE3 ik_pose = data_.oMf[end_effector_frame_id];
 
-  tau_gravity = params_.use_gravity_compensation
-    ? pinocchio::computeGeneralizedGravity(model_, data_, q_pin)
-    : Eigen::VectorXd::Zero(model_.nv);
+    error.head(3) = inner_SE3_.translation() - ik_pose.translation();
+    error.tail(3) = pinocchio::log3(inner_SE3_.rotation() * ik_pose.rotation().transpose());
 
-  tau_wrench << J.transpose() * target_wrench_;
+    if (params_.limit_error) {
+      max_delta_ << params_.task.error_clip.x, params_.task.error_clip.y, params_.task.error_clip.z,
+        params_.task.error_clip.rx, params_.task.error_clip.ry, params_.task.error_clip.rz;
+      error = error.cwiseMax(-max_delta_).cwiseMin(max_delta_);
+    }
 
-  tau_d << tau_task + tau_nullspace + tau_friction + tau_coriolis + tau_gravity + tau_joint_limits +
-      tau_wrench;
+    J.setZero();
+    pinocchio::computeFrameJacobian(
+      model_, data_, q_ik_pin_, end_effector_frame_id,
+      pinocchio::ReferenceFrame::LOCAL_WORLD_ALIGNED, J);
 
-  // 16. Torque saturation and filtering
-  if (params_.limit_torques) {
-    tau_d = saturateTorqueRate(tau_d, tau_previous, params_.max_delta_tau);
-  }
-  tau_d = exponential_moving_average(tau_previous, tau_d, params_.filter.output_torque);
+    // Metric-weight rotational rows by characteristic wrist length (0.10 m/rad) before
+    // damped SVD pseudoinverse so translational (m/rad) and rotational (rad/rad) singular
+    // values share consistent units and wrist alignment does not distort translation.
+    Eigen::Vector<double, 6> w_task;
+    w_task << 1.0, 1.0, 1.0, 0.10, 0.10, 0.10;
+    const Eigen::MatrixXd J_weighted = w_task.asDiagonal() * J;
+    J_pinv = pseudo_inverse(J_weighted, 1.5e-2) * w_task.asDiagonal();
 
-  // 17. Command interfaces
-  if (!params_.stop_commands) {
-    for (size_t i = 0; i < params_.joints.size(); ++i) {
+    if (params_.nullspace.projector_type == "none") {
+      nullspace_projection = Id_nv;
+    } else {
+      nullspace_projection = Id_nv - J_pinv * J;
+    }
+
+    Eigen::Vector<double, 6> ik_gain;
+    ik_gain << params_.position_control.ik_gain_pos,
+      params_.position_control.ik_gain_pos,
+      params_.position_control.ik_gain_pos,
+      params_.position_control.ik_gain_rot,
+      params_.position_control.ik_gain_rot,
+      params_.position_control.ik_gain_rot;
+
+    const Eigen::Vector<double, 6> twist_cmd = inner_motion_ + ik_gain.cwiseProduct(error);
+    const Eigen::VectorXd dq_null = params_.position_control.nullspace_gain * (q_ref - q_ik_);
+    dq_cmd_ = J_pinv * twist_cmd + nullspace_projection * dq_null;
+
+    const double max_vel = params_.position_control.max_joint_velocity;
+    const double max_abs_dq = dq_cmd_.cwiseAbs().maxCoeff();
+    if (max_abs_dq > max_vel && max_abs_dq > 0.0) {
+      dq_cmd_ *= (max_vel / max_abs_dq);
+    }
+    if (dt > 0.0) {
+      const Eigen::VectorXd ddq_raw = (dq_cmd_ - dq_cmd_prev_) / dt;
+      ddq_cmd_filtered_ = 0.70 * ddq_cmd_filtered_ + 0.30 * ddq_raw;
+    }
+    dq_cmd_prev_ = dq_cmd_;
+
+    q_ik_ += dq_cmd_ * dt;
+    if (model_.nq == model_.nv) {
+      q_ik_ = q_ik_.cwiseMax(model_.lowerPositionLimit).cwiseMin(model_.upperPositionLimit);
+    }
+    const double max_lag = params_.position_control.max_joint_lag;
+    q_ik_ = q_ik_.cwiseMax((q.array() - max_lag).matrix()).cwiseMin((q.array() + max_lag).matrix());
+
+    if (!params_.stop_commands) {
+      for (size_t i = 0; i < num_joints; ++i) {
 #if ROS2_VERSION_ABOVE_HUMBLE
-      (void)command_interfaces_[i].set_value(tau_d[i]);
+        (void)command_interfaces_[i].set_value(q_ik_[i]);
+        (void)command_interfaces_[num_joints + i].set_value(dq_cmd_[i]);
 #else
-      command_interfaces_[i].set_value(tau_d[i]);
+        command_interfaces_[i].set_value(q_ik_[i]);
+        command_interfaces_[num_joints + i].set_value(dq_cmd_[i]);
 #endif
+      }
     }
-  }
+  } else {
+    // Use inner_SE3_ as the desired for impedance outer loop
+    // Compute impedance error (same as CartesianController but using inner_SE3_ as target)
+    if (params_.use_local_jacobian) {
+      error.head(3) = end_effector_pose.rotation().transpose() *
+        (inner_SE3_.translation() - end_effector_pose.translation());
+      error.tail(3) =
+        pinocchio::log3(end_effector_pose.rotation().transpose() * inner_SE3_.rotation());
+    } else {
+      error.head(3) = inner_SE3_.translation() - end_effector_pose.translation();
+      error.tail(3) =
+        pinocchio::log3(inner_SE3_.rotation() * end_effector_pose.rotation().transpose());
+    }
 
-  tau_previous = tau_d;
+    // 12. Error clipping (same as CartesianController)
+    if (params_.limit_error) {
+      max_delta_ << params_.task.error_clip.x, params_.task.error_clip.y, params_.task.error_clip.z,
+        params_.task.error_clip.rx, params_.task.error_clip.ry, params_.task.error_clip.rz;
+      error = error.cwiseMax(-max_delta_).cwiseMin(max_delta_);
+    }
+
+    // 13. Jacobian, pseudo-inverse, nullspace, Mx computation (same as CartesianController)
+    J.setZero();
+    auto reference_frame = params_.use_local_jacobian
+      ? pinocchio::ReferenceFrame::LOCAL
+      : pinocchio::ReferenceFrame::LOCAL_WORLD_ALIGNED;
+    pinocchio::computeFrameJacobian(model_, data_, q_pin, end_effector_frame_id, reference_frame, J);
+
+    J_pinv = pseudo_inverse(J, params_.nullspace.regularization);
+    if (params_.nullspace.projector_type == "dynamic" || params_.use_operational_space) {
+      pinocchio::computeMinverse(model_, data_, q_pin);
+      data_.Minv.triangularView<Eigen::StrictlyLower>() =
+        data_.Minv.transpose().triangularView<Eigen::StrictlyLower>();
+      Mx_inv = J * data_.Minv * J.transpose();
+      Mx = pseudo_inverse(Mx_inv, params_.operational_space_regularization);
+    }
+
+    if (params_.nullspace.projector_type == "dynamic") {
+      auto J_bar = data_.Minv * J.transpose() * Mx;
+      nullspace_projection = Id_nv - J.transpose() * J_bar.transpose();
+    } else if (params_.nullspace.projector_type == "kinematic") {
+      nullspace_projection = Id_nv - J_pinv * J;
+    } else if (params_.nullspace.projector_type == "none") {
+      nullspace_projection = Eigen::MatrixXd::Identity(model_.nv, model_.nv);
+    } else {
+      RCLCPP_ERROR_STREAM_ONCE(
+        get_node()->get_logger(),
+        "Unknown nullspace projector type: " << params_.nullspace.projector_type);
+      return controller_interface::return_type::ERROR;
+    }
+
+    // 14. Task torque (impedance): tau_task = J^T * (K * error - D * J * dq) or J^T * Mx * (...)
+    if (params_.use_operational_space) {
+      tau_task << J.transpose() * Mx * (stiffness * error - damping * (J * dq));
+    } else {
+      tau_task << J.transpose() * (stiffness * error - damping * (J * dq));
+    }
+
+    // 15. All compensation torques (same as CartesianController)
+    if (model_.nq != model_.nv) {
+      tau_joint_limits = Eigen::VectorXd::Zero(model_.nv);
+    } else {
+      tau_joint_limits = get_joint_limit_torque(
+        q,
+        model_.lowerPositionLimit,
+        model_.upperPositionLimit,
+        params_.joint_limit_repulsion.safe_range,
+        params_.joint_limit_repulsion.max_torque);
+    }
+
+    tau_secondary << nullspace_stiffness * (q_ref - q) + nullspace_damping * (dq_ref - dq);
+
+    tau_nullspace << nullspace_projection * tau_secondary;
+    tau_nullspace =
+      tau_nullspace.cwiseMin(params_.nullspace.max_tau).cwiseMax(-params_.nullspace.max_tau);
+
+    if (params_.use_friction) {
+      tau_friction = computeFrictionTorque(dq);
+    } else {
+      tau_friction.setZero();
+    }
+
+    if (params_.use_coriolis_compensation) {
+      pinocchio::computeAllTerms(model_, data_, q_pin, dq);
+      tau_coriolis = pinocchio::computeCoriolisMatrix(model_, data_, q_pin, dq) * dq;
+    } else {
+      tau_coriolis = Eigen::VectorXd::Zero(model_.nv);
+    }
+
+    tau_gravity = params_.use_gravity_compensation
+      ? pinocchio::computeGeneralizedGravity(model_, data_, q_pin)
+      : Eigen::VectorXd::Zero(model_.nv);
+
+    tau_wrench << J.transpose() * target_wrench_;
+
+    tau_d << tau_task + tau_nullspace + tau_friction + tau_coriolis + tau_gravity + tau_joint_limits +
+        tau_wrench;
+
+    // 16. Torque saturation and filtering
+    if (params_.limit_torques) {
+      tau_d = saturateTorqueRate(tau_d, tau_previous, params_.max_delta_tau);
+    }
+    tau_d = exponential_moving_average(tau_previous, tau_d, params_.filter.output_torque);
+
+    // 17. Command interfaces
+    if (!params_.stop_commands) {
+      for (size_t i = 0; i < params_.joints.size(); ++i) {
+#if ROS2_VERSION_ABOVE_HUMBLE
+        (void)command_interfaces_[i].set_value(tau_d[i]);
+#else
+        command_interfaces_[i].set_value(tau_d[i]);
+#endif
+      }
+    }
+
+    tau_previous = tau_d;
+  }
 
   // 18. Refresh parameters
   params_listener_->refresh_dynamic_parameters();
@@ -459,9 +596,31 @@ CartesianAdmittanceController::on_configure(const rclcpp_lifecycle::State & /*pr
   q_target = Eigen::VectorXd::Zero(model_.nv);
   dq_ref = Eigen::VectorXd::Zero(model_.nv);
   tau_previous = Eigen::VectorXd::Zero(model_.nv);
+  tau_meas_ = Eigen::VectorXd::Zero(model_.nv);
+  q_ik_ = Eigen::VectorXd::Zero(model_.nv);
+  q_ik_pin_ = Eigen::VectorXd::Zero(model_.nq);
+  dq_cmd_ = Eigen::VectorXd::Zero(model_.nv);
+  dq_cmd_prev_ = Eigen::VectorXd::Zero(model_.nv);
+  ddq_cmd_filtered_ = Eigen::VectorXd::Zero(model_.nv);
+  ft_wrench_filtered_.setZero();
   J = Eigen::MatrixXd::Zero(6, model_.nv);
   J_pinv = Eigen::MatrixXd::Zero(model_.nv, 6);
   Id_nv = Eigen::MatrixXd::Identity(model_.nv, model_.nv);
+
+  has_drive_coupling_ = false;
+  if (!params_.friction.drive_coupling.empty()) {
+    const size_t expected = static_cast<size_t>(model_.nv) * static_cast<size_t>(model_.nv);
+    if (params_.friction.drive_coupling.size() != expected) {
+      RCLCPP_ERROR(
+        get_node()->get_logger(),
+        "friction.drive_coupling must have %zu elements (nv*nv), got %zu.",
+        expected, params_.friction.drive_coupling.size());
+      return CallbackReturn::ERROR;
+    }
+    friction_drive_coupling_ = Eigen::Map<const Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>>(
+      params_.friction.drive_coupling.data(), model_.nv, model_.nv);
+    has_drive_coupling_ = true;
+  }
 
   // Load friction model parameters based on selected model type
   if (params_.friction.model_type == "sigmoidal_viscous") {
@@ -635,18 +794,25 @@ CartesianAdmittanceController::on_configure(const rclcpp_lifecycle::State & /*pr
 
   // --- Admittance-specific subscriptions ---
 
-  // F/T sensor subscription
-  auto ft_sensor_callback =
-    [this](const std::shared_ptr<geometry_msgs::msg::WrenchStamped> msg) -> void {
-    ft_sensor_buffer_.writeFromNonRT(msg);
-    new_ft_sensor_ = true;
-  };
+  // F/T sensor subscription (skipped when estimating wrench from joint effort state interfaces)
+  if (params_.ft_sensor.use_joint_effort) {
+    RCLCPP_INFO(
+      get_node()->get_logger(),
+      "Using joint effort state interfaces for external wrench estimation (command_mode=%s).",
+      params_.command_mode.c_str());
+  } else {
+    auto ft_sensor_callback =
+      [this](const std::shared_ptr<geometry_msgs::msg::WrenchStamped> msg) -> void {
+      ft_sensor_buffer_.writeFromNonRT(msg);
+      new_ft_sensor_ = true;
+    };
 
-  ft_sensor_sub_ = get_node()->create_subscription<geometry_msgs::msg::WrenchStamped>(
-    params_.ft_sensor.topic, rclcpp::SensorDataQoS(), ft_sensor_callback);
+    ft_sensor_sub_ = get_node()->create_subscription<geometry_msgs::msg::WrenchStamped>(
+      params_.ft_sensor.topic, rclcpp::SensorDataQoS(), ft_sensor_callback);
 
-  RCLCPP_INFO(get_node()->get_logger(), "F/T sensor subscription on topic: %s",
-    params_.ft_sensor.topic.c_str());
+    RCLCPP_INFO(get_node()->get_logger(), "F/T sensor subscription on topic: %s",
+      params_.ft_sensor.topic.c_str());
+  }
 
   // Variable admittance stiffness subscription
   if (params_.variable_admittance_stiffness.enabled) {
@@ -850,6 +1016,14 @@ void CartesianAdmittanceController::updateCurrentState(bool initialize) {
       ? dq_meas
       : exponential_moving_average(dq[i], dq_meas, params_.filter.dq);
 
+    if (params_.ft_sensor.use_joint_effort) {
+#if ROS2_VERSION_ABOVE_HUMBLE
+      tau_meas_[i] = state_interfaces_[2 * num_joints + i].get_optional().value_or(tau_meas_[i]);
+#else
+      tau_meas_[i] = state_interfaces_[2 * num_joints + i].get_value();
+#endif
+    }
+
     q_target[i] = initialize ? q_meas : q_target[i];
   }
 }
@@ -877,7 +1051,14 @@ CartesianAdmittanceController::on_activate(const rclcpp_lifecycle::State & /*pre
   // Reset admittance state so it reinitializes on first update cycle
   admittance_initialized_ = false;
   inner_motion_.setZero();
+  filter_twist_world_.setZero();
+  filter_accel_world_.setZero();
   ft_wrench_.setZero();
+  ft_wrench_filtered_.setZero();
+  q_ik_ = q;
+  dq_cmd_.setZero();
+  dq_cmd_prev_.setZero();
+  ddq_cmd_filtered_.setZero();
 
   RCLCPP_INFO(get_node()->get_logger(), "Admittance controller activated.");
   return CallbackReturn::SUCCESS;
@@ -1199,6 +1380,69 @@ bool CartesianAdmittanceController::check_topic_publisher_count(const std::strin
   }
 
   return true;
+}
+
+Eigen::VectorXd CartesianAdmittanceController::computeFrictionTorque(const Eigen::VectorXd & vel) const {
+  const Eigen::VectorXd v_drive = has_drive_coupling_ ? (friction_drive_coupling_ * vel).eval() : vel;
+  Eigen::VectorXd tau_drive;
+  switch (friction_model_type_) {
+    case FrictionModelType::kSignoidal:
+      tau_drive = get_friction(v_drive, fp1, fp2, fp3);
+      break;
+    case FrictionModelType::kSigmoidalViscous:
+      tau_drive = get_friction_sigmoidal_viscous(
+        v_drive, friction_f_v, friction_f_o, friction_f_c, friction_alpha, friction_ni);
+      break;
+  }
+  return has_drive_coupling_ ? (friction_drive_coupling_.transpose() * tau_drive).eval() : tau_drive;
+}
+
+Eigen::Vector<double, 6> CartesianAdmittanceController::estimateExternalWrenchWorld() {
+  const Eigen::VectorXd tau_rnea = pinocchio::rnea(
+    model_, data_, q_pin, dq, ddq_cmd_filtered_);
+  const Eigen::VectorXd tau_fric = params_.ft_sensor.include_friction_in_effort_est
+    ? computeFrictionTorque(dq)
+    : Eigen::VectorXd::Zero(model_.nv);
+  Eigen::VectorXd tau_ext = (tau_rnea + tau_fric) - tau_meas_;
+
+  // Apply per-joint stiction deadband before Jacobian pseudoinverse so small wrist torque
+  // residuals are not amplified by 1 / l_wrist into large spurious linear forces at the TCP.
+  for (Eigen::Index j = 0; j < tau_ext.size(); ++j) {
+    double j_db = 0.5;
+    if (friction_model_type_ == FrictionModelType::kSigmoidalViscous && j < friction_f_c.size()) {
+      j_db = std::max(0.35, 0.65 * friction_f_c[j]);
+    }
+    const double tj = tau_ext[j];
+    tau_ext[j] = (std::abs(tj) <= j_db) ? 0.0 : (tj > 0.0 ? tj - j_db : tj + j_db);
+  }
+
+  Eigen::Matrix<double, 6, Eigen::Dynamic> J_world =
+    Eigen::Matrix<double, 6, Eigen::Dynamic>::Zero(6, model_.nv);
+  pinocchio::computeFrameJacobian(
+    model_, data_, q_pin, end_effector_frame_id,
+    pinocchio::ReferenceFrame::LOCAL_WORLD_ALIGNED, J_world);
+
+  const double lambda = params_.ft_sensor.wrench_regularization;
+  const Eigen::Matrix<double, 6, 6> A =
+    J_world * J_world.transpose() + lambda * Eigen::Matrix<double, 6, 6>::Identity();
+  const Eigen::Vector<double, 6> w_raw = A.ldlt().solve(J_world * tau_ext);
+
+  ft_wrench_filtered_ = exponential_moving_average(
+    ft_wrench_filtered_, w_raw, params_.ft_sensor.effort_filter_alpha);
+
+  Eigen::Vector<double, 6> w_out;
+  for (int i = 0; i < 6; ++i) {
+    const double db = (i < 3)
+      ? params_.ft_sensor.wrench_deadband_force
+      : params_.ft_sensor.wrench_deadband_torque;
+    const double v = ft_wrench_filtered_[i];
+    if (std::abs(v) <= db) {
+      w_out[i] = 0.0;
+    } else {
+      w_out[i] = v > 0.0 ? (v - db) : (v + db);
+    }
+  }
+  return w_out;
 }
 
 }  // namespace crisp_controllers

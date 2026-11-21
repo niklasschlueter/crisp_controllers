@@ -312,6 +312,15 @@ cartesian_controller:
       description: "EMA smoothing factor for the target pose (position and orientation). 0=no filtering, 1=never updates."
       validation:
         bounds<>: [0.0, 1.0]
+    pose_natural_freq:
+      type: double
+      default_value: 0.0
+      description: >
+        Natural frequency [Hz] of an analytic 2nd-order critically-damped reference filter on target_pose.
+        When > 0.0, replaces the 1st-order target_pose EMA with a C2-smooth critically-damped filter and
+        automatically provides an internal reference twist dx_d when no external target_twist is active.
+      validation:
+        bounds<>: [0.0, 200.0]
     q:
       type: double
       default_value: 0.5
@@ -583,3 +592,32 @@ cartesian_controller:
     type: bool
     default_value: false
     description: "Whether or not to enable introspection for this controller. This will allow us to visualize the internal state of the controller in plotjuggler using the introspection topics."
+
+  onboard_pid:
+    enabled:
+      type: bool
+      default_value: false
+      read_only: true
+      description: >
+        When true, claims position, velocity, effort, p_gain, i_gain, and d_gain command interfaces
+        (putting RSL DuaDrives into JointPositionVelocityTorquePidGains mode) so the drive's onboard
+        kHz loop executes high-frequency velocity damping around dq_target = J^+ * dx_d while preserving
+        Cartesian torque impedance compliance (with p_gains = 0, i_gains = 0).
+    p_gains:
+      type: double_array
+      default_value: []
+      description: "Per-joint onboard position P gains (empty = 0.0 for all joints)."
+    i_gains:
+      type: double_array
+      default_value: []
+      description: "Per-joint onboard position I gains (empty = 0.0 for all joints)."
+    d_gains:
+      type: double_array
+      default_value: []
+      description: "Per-joint onboard kHz velocity D gains [Nm*s/rad] (empty = 0.0 for all joints)."
+    velocity_error_gain:
+      type: double
+      default_value: 0.0
+      description: "Optional task-space pose error gain [1/s] added to dx_d when computing the onboard velocity target dq_cmd = J^+ * (dx_d + k_v * error)."
+      validation:
+        bounds<>: [0.0, 100.0]

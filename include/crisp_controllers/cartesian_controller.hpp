@@ -205,6 +205,12 @@ private:
   /** @brief Cartesian velocity feedforward used in the damping term.
    *  Equals target_twist_ when feedforward is enabled and fresh, zero otherwise. */
   Eigen::Matrix<double, 6, 1> dx_d_ = Eigen::Matrix<double, 6, 1>::Zero();
+  /** @brief Internal 2nd-order critically-damped pose filter velocity in LOCAL_WORLD_ALIGNED frame */
+  Eigen::Matrix<double, 6, 1> filter_twist_world_ = Eigen::Matrix<double, 6, 1>::Zero();
+  /** @brief Saved onboard drive PID gains restored on on_deactivate() when onboard_pid.enabled is true */
+  Eigen::VectorXd prev_p_gains_, prev_i_gains_, prev_d_gains_;
+  /** @brief Whether prev_*_gains_ were captured during on_activate() */
+  bool has_saved_pid_gains_ = false;
 
   /** @brief Parameter listener for dynamic parameter updates */
   std::shared_ptr<cartesian_controller::ParamListener> params_listener_;

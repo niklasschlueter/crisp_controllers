@@ -15,6 +15,49 @@ cartesian_admittance_controller:
     default_value: ""
     description: "Name of the base/root frame as reference for kinematics computations"
 
+  command_mode:
+    type: string
+    default_value: "effort"
+    read_only: true
+    description: >
+      Command interface mode for the outer control loop:
+      'effort': impedance torque control commanding joint effort interfaces (default).
+      'position_velocity': closed-loop inverse kinematics (CLIK) commanding joint position + velocity interfaces.
+    validation:
+      one_of<>: [["effort", "position_velocity"]]
+
+  position_control:
+    ik_gain_pos:
+      type: double
+      default_value: 15.0
+      description: "CLIK translational error feedback gain [1/s] when command_mode == 'position_velocity'."
+      validation:
+        bounds<>: [0.0, 200.0]
+    ik_gain_rot:
+      type: double
+      default_value: 15.0
+      description: "CLIK rotational error feedback gain [1/s] when command_mode == 'position_velocity'."
+      validation:
+        bounds<>: [0.0, 200.0]
+    nullspace_gain:
+      type: double
+      default_value: 2.0
+      description: "Nullspace posture gain [1/s] toward q_ref when command_mode == 'position_velocity'."
+      validation:
+        bounds<>: [0.0, 50.0]
+    max_joint_velocity:
+      type: double
+      default_value: 1.5
+      description: "Per-joint velocity clamp [rad/s] when command_mode == 'position_velocity'."
+      validation:
+        bounds<>: [0.01, 10.0]
+    max_joint_lag:
+      type: double
+      default_value: 0.25
+      description: "Max allowed |q_ik - q_meas| [rad] to prevent IK windup against obstacles or limits."
+      validation:
+        bounds<>: [0.01, 2.0]
+
   use_operational_space:
     type: bool
     default_value: False
@@ -282,6 +325,15 @@ cartesian_admittance_controller:
       description: "EMA smoothing factor for the output torque. 0=no filtering, 1=never updates."
       validation:
         bounds<>: [0.0, 1.0]
+    pose_natural_freq:
+      type: double
+      default_value: 0.0
+      description: >
+        Natural frequency [Hz] of an analytic 2nd-order critically-damped reference filter on target_pose.
+        When > 0.0, replaces the 1st-order target_pose EMA and provides desired reference twist dx_ref
+        to the admittance damper so free-space tracking has zero velocity-damping lag.
+      validation:
+        bounds<>: [0.0, 200.0]
 
   limit_error:
     type: bool
@@ -413,6 +465,10 @@ cartesian_admittance_controller:
       type: double_array
       default_value: []
       description: "Sigmoidal+viscous model: velocity shift per joint [rad/s]."
+    drive_coupling:
+      type: double_array
+      default_value: []
+      description: "Optional row-major nv x nv joint-to-drive coupling matrix A (v_drive = A * dq, tau_joint = A^T * tau_drive)."
 
   variable_max_impedance_stiffness:
     translational:
@@ -562,6 +618,39 @@ cartesian_admittance_controller:
       type: string
       default_value: ""
       description: "Name of the F/T sensor measurement frame in the URDF. If empty, defaults to end_effector_frame (legacy behavior)."
+    use_joint_effort:
+      type: bool
+      default_value: false
+      read_only: true
+      description: "Estimate external Cartesian wrench from joint effort state interfaces minus RNEA dynamics (and optional friction) instead of ft_sensor.topic."
+    effort_filter_alpha:
+      type: double
+      default_value: 0.15
+      description: "EMA filter alpha (0..1] for the joint-effort-based external wrench estimate."
+      validation:
+        bounds<>: [0.001, 1.0]
+    wrench_deadband_force:
+      type: double
+      default_value: 3.0
+      description: "Per-axis soft force deadband [N] applied to estimated external wrench to reject stiction/noise."
+      validation:
+        bounds<>: [0.0, 100.0]
+    wrench_deadband_torque:
+      type: double
+      default_value: 0.4
+      description: "Per-axis soft torque deadband [Nm] applied to estimated external wrench to reject stiction/noise."
+      validation:
+        bounds<>: [0.0, 50.0]
+    wrench_regularization:
+      type: double
+      default_value: 0.01
+      description: "Regularization lambda for (J * J^T + lambda * I)^-1 when projecting tau_ext to Cartesian wrench."
+      validation:
+        bounds<>: [0.0001, 1.0]
+    include_friction_in_effort_est:
+      type: bool
+      default_value: true
+      description: "Subtract configured friction model (friction.*) from measured joint effort when estimating external torque."
 
   variable_max_admittance_stiffness:
     translational:
