@@ -47,12 +47,26 @@ controller_interface::InterfaceConfiguration
 CartesianAdmittanceController::command_interface_configuration() const {
   controller_interface::InterfaceConfiguration config;
   config.type = controller_interface::interface_configuration_type::INDIVIDUAL;
-  if (params_.command_mode == "position_velocity") {
+  if (isPositionCommandMode()) {
     for (const auto & joint_name : params_.joints) {
       config.names.push_back(joint_name + "/position");
     }
     for (const auto & joint_name : params_.joints) {
       config.names.push_back(joint_name + "/velocity");
+    }
+    if (params_.command_mode == "position_velocity_torque_pid") {
+      for (const auto & joint_name : params_.joints) {
+        config.names.push_back(joint_name + "/effort");
+      }
+      for (const auto & joint_name : params_.joints) {
+        config.names.push_back(joint_name + "/p_gain");
+      }
+      for (const auto & joint_name : params_.joints) {
+        config.names.push_back(joint_name + "/i_gain");
+      }
+      for (const auto & joint_name : params_.joints) {
+        config.names.push_back(joint_name + "/d_gain");
+      }
     }
   } else {
     for (const auto & joint_name : params_.joints) {
@@ -99,7 +113,7 @@ CartesianAdmittanceController::update(const rclcpp::Time & time, const rclcpp::D
   // from driving toward a stale goal when the sender crashes or the network drops.
   if (params_.pose_safety.timeout.enabled) {
     const pinocchio::SE3 & hold_pose =
-      (params_.command_mode == "position_velocity" && admittance_initialized_)
+      (isPositionCommandMode() && admittance_initialized_)
         ? inner_SE3_
         : end_effector_pose;
     if (apply_pose_timeout(
@@ -108,7 +122,7 @@ CartesianAdmittanceController::update(const rclcpp::Time & time, const rclcpp::D
           hold_pose,
           target_position_, target_orientation_,
           get_node()->get_logger(), get_node()->get_clock())) {
-      if (params_.command_mode == "position_velocity") {
+      if (isPositionCommandMode()) {
         desired_position_ = target_position_;
         desired_orientation_ = target_orientation_;
         filter_twist_world_.setZero();
@@ -160,14 +174,20 @@ CartesianAdmittanceController::update(const rclcpp::Time & time, const rclcpp::D
       "Holding previous torque command this cycle.");
     if (!params_.stop_commands) {
       const size_t num_joints = params_.joints.size();
-      if (params_.command_mode == "position_velocity") {
+      if (isPositionCommandMode()) {
         for (size_t i = 0; i < num_joints; ++i) {
 #if ROS2_VERSION_ABOVE_HUMBLE
           (void)command_interfaces_[i].set_value(q_ik_[i]);
           (void)command_interfaces_[num_joints + i].set_value(0.0);
+          if (params_.command_mode == "position_velocity_torque_pid") {
+            (void)command_interfaces_[2 * num_joints + i].set_value(tau_previous[i]);
+          }
 #else
           command_interfaces_[i].set_value(q_ik_[i]);
           command_interfaces_[num_joints + i].set_value(0.0);
+          if (params_.command_mode == "position_velocity_torque_pid") {
+            command_interfaces_[2 * num_joints + i].set_value(tau_previous[i]);
+          }
 #endif
         }
       } else {
@@ -276,8 +296,8 @@ CartesianAdmittanceController::update(const rclcpp::Time & time, const rclcpp::D
       (pinocchio::exp3(Eigen::Vector3d(inner_motion_.tail(3) * dt)) * inner_SE3_.rotation()).eval();
   }
 
-  // 11. Outer loop: either position+velocity (CLIK) or effort (Cartesian impedance)
-  if (params_.command_mode == "position_velocity") {
+  // 11. Outer loop: either position+velocity(+torque+pid) CLIK or effort (Cartesian impedance)
+  if (isPositionCommandMode()) {
     const size_t num_joints = params_.joints.size();
     for (size_t i = 0; i < num_joints; ++i) {
       const auto joint_id = model_.getJointId(params_.joints[i]);
@@ -357,14 +377,76 @@ CartesianAdmittanceController::update(const rclcpp::Time & time, const rclcpp::D
     const double max_lag = params_.position_control.max_joint_lag;
     q_ik_ = q_ik_.cwiseMax((q.array() - max_lag).matrix()).cwiseMin((q.array() + max_lag).matrix());
 
+    const bool use_torque_pid = (params_.command_mode == "position_velocity_torque_pid");
+    Eigen::VectorXd tau_ff;
+    if (use_torque_pid) {
+      // Update q_ik_pin_ with integrated q_ik_ for clean, noise-free dynamics feedforward.
+      for (size_t i = 0; i < num_joints; ++i) {
+        const auto joint_id = model_.getJointId(params_.joints[i]);
+        const auto joint = model_.joints[joint_id];
+        if (continous_joint_types.count(joint.shortname())) {
+          q_ik_pin_[joint.idx_q()] = std::cos(q_ik_[i]);
+          q_ik_pin_[joint.idx_q() + 1] = std::sin(q_ik_[i]);
+        } else {
+          q_ik_pin_[joint.idx_q()] = q_ik_[i];
+        }
+      }
+      tau_ff = Eigen::VectorXd::Zero(model_.nv);
+      if (params_.position_control.use_gravity_feedforward &&
+          params_.position_control.use_coriolis_feedforward) {
+        tau_ff += pinocchio::rnea(
+          model_, data_, q_ik_pin_, dq_cmd_, Eigen::VectorXd::Zero(model_.nv));
+      } else if (params_.position_control.use_gravity_feedforward) {
+        tau_ff += pinocchio::computeGeneralizedGravity(model_, data_, q_ik_pin_);
+      } else if (params_.position_control.use_coriolis_feedforward) {
+        pinocchio::computeAllTerms(model_, data_, q_ik_pin_, dq_cmd_);
+        tau_ff += pinocchio::computeCoriolisMatrix(model_, data_, q_ik_pin_, dq_cmd_) * dq_cmd_;
+      }
+      if (params_.position_control.friction_feedforward_scale > 0.0) {
+        tau_ff += params_.position_control.friction_feedforward_scale *
+                  computeFrictionTorque(dq_cmd_);
+      }
+      tau_previous = tau_ff;
+    }
+
     if (!params_.stop_commands) {
       for (size_t i = 0; i < num_joints; ++i) {
 #if ROS2_VERSION_ABOVE_HUMBLE
         (void)command_interfaces_[i].set_value(q_ik_[i]);
         (void)command_interfaces_[num_joints + i].set_value(dq_cmd_[i]);
+        if (use_torque_pid) {
+          const double pg = (i < params_.position_control.p_gains.size())
+            ? params_.position_control.p_gains[i]
+            : (i < prev_p_gains_.size() ? prev_p_gains_[i] : 300.0);
+          const double ig = (i < params_.position_control.i_gains.size())
+            ? params_.position_control.i_gains[i]
+            : (i < prev_i_gains_.size() ? prev_i_gains_[i] : 0.0);
+          const double dg = (i < params_.position_control.d_gains.size())
+            ? params_.position_control.d_gains[i]
+            : (i < prev_d_gains_.size() ? prev_d_gains_[i] : 15.0);
+          (void)command_interfaces_[2 * num_joints + i].set_value(tau_ff[i]);
+          (void)command_interfaces_[3 * num_joints + i].set_value(pg);
+          (void)command_interfaces_[4 * num_joints + i].set_value(ig);
+          (void)command_interfaces_[5 * num_joints + i].set_value(dg);
+        }
 #else
         command_interfaces_[i].set_value(q_ik_[i]);
         command_interfaces_[num_joints + i].set_value(dq_cmd_[i]);
+        if (use_torque_pid) {
+          const double pg = (i < params_.position_control.p_gains.size())
+            ? params_.position_control.p_gains[i]
+            : (i < prev_p_gains_.size() ? prev_p_gains_[i] : 300.0);
+          const double ig = (i < params_.position_control.i_gains.size())
+            ? params_.position_control.i_gains[i]
+            : (i < prev_i_gains_.size() ? prev_i_gains_[i] : 0.0);
+          const double dg = (i < params_.position_control.d_gains.size())
+            ? params_.position_control.d_gains[i]
+            : (i < prev_d_gains_.size() ? prev_d_gains_[i] : 15.0);
+          command_interfaces_[2 * num_joints + i].set_value(tau_ff[i]);
+          command_interfaces_[3 * num_joints + i].set_value(pg);
+          command_interfaces_[4 * num_joints + i].set_value(ig);
+          command_interfaces_[5 * num_joints + i].set_value(dg);
+        }
 #endif
       }
     }
@@ -1086,12 +1168,51 @@ CartesianAdmittanceController::on_activate(const rclcpp_lifecycle::State & /*pre
   dq_cmd_prev_.setZero();
   ddq_cmd_filtered_.setZero();
 
+  has_saved_pid_gains_ = false;
+  if (params_.command_mode == "position_velocity_torque_pid") {
+    const size_t num_joints = params_.joints.size();
+    prev_p_gains_.resize(num_joints);
+    prev_i_gains_.resize(num_joints);
+    prev_d_gains_.resize(num_joints);
+    for (size_t i = 0; i < num_joints; ++i) {
+#if ROS2_VERSION_ABOVE_HUMBLE
+      prev_p_gains_[i] = command_interfaces_[3 * num_joints + i].get_optional().value_or(600.0);
+      prev_i_gains_[i] = command_interfaces_[4 * num_joints + i].get_optional().value_or(0.5);
+      prev_d_gains_[i] = command_interfaces_[5 * num_joints + i].get_optional().value_or(20.0);
+#else
+      prev_p_gains_[i] = command_interfaces_[3 * num_joints + i].get_value();
+      prev_i_gains_[i] = command_interfaces_[4 * num_joints + i].get_value();
+      prev_d_gains_[i] = command_interfaces_[5 * num_joints + i].get_value();
+#endif
+    }
+    has_saved_pid_gains_ = true;
+    if (params_.position_control.use_gravity_feedforward) {
+      tau_previous = pinocchio::computeGeneralizedGravity(model_, data_, q_pin);
+    } else {
+      tau_previous.setZero();
+    }
+  }
+
   RCLCPP_INFO(get_node()->get_logger(), "Admittance controller activated.");
   return CallbackReturn::SUCCESS;
 }
 
 controller_interface::CallbackReturn
 CartesianAdmittanceController::on_deactivate(const rclcpp_lifecycle::State & /*previous_state*/) {
+  if (params_.command_mode == "position_velocity_torque_pid" && has_saved_pid_gains_) {
+    const size_t num_joints = params_.joints.size();
+    for (size_t i = 0; i < num_joints; ++i) {
+#if ROS2_VERSION_ABOVE_HUMBLE
+      (void)command_interfaces_[3 * num_joints + i].set_value(prev_p_gains_[i]);
+      (void)command_interfaces_[4 * num_joints + i].set_value(prev_i_gains_[i]);
+      (void)command_interfaces_[5 * num_joints + i].set_value(prev_d_gains_[i]);
+#else
+      command_interfaces_[3 * num_joints + i].set_value(prev_p_gains_[i]);
+      command_interfaces_[4 * num_joints + i].set_value(prev_i_gains_[i]);
+      command_interfaces_[5 * num_joints + i].set_value(prev_d_gains_[i]);
+#endif
+    }
+  }
   return CallbackReturn::SUCCESS;
 }
 

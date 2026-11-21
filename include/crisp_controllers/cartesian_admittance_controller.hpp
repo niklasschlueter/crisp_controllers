@@ -187,6 +187,12 @@ private:
    */
   Eigen::Vector<double, 6> estimateExternalWrenchWorld();
 
+  /** @brief True when command_mode uses the CLIK position outer loop */
+  bool isPositionCommandMode() const {
+    return params_.command_mode == "position_velocity" ||
+           params_.command_mode == "position_velocity_torque_pid";
+  }
+
   // ---- Flags for new data ----
   bool new_target_pose_;
   bool new_target_joint_;
@@ -325,6 +331,12 @@ private:
 
   /** @brief Previously computed torque */
   Eigen::VectorXd tau_previous;
+
+  /** @brief Saved onboard drive PID gains restored on deactivate (position_velocity_torque_pid mode) */
+  std::vector<double> prev_p_gains_;
+  std::vector<double> prev_i_gains_;
+  std::vector<double> prev_d_gains_;
+  bool has_saved_pid_gains_ = false;
 
   /** @brief Current end effector pose */
   pinocchio::SE3 end_effector_pose;

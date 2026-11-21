@@ -23,32 +23,34 @@ cartesian_admittance_controller:
       Command interface mode for the outer control loop:
       'effort': impedance torque control commanding joint effort interfaces (default).
       'position_velocity': closed-loop inverse kinematics (CLIK) commanding joint position + velocity interfaces.
+      'position_velocity_torque_pid': CLIK commanding position + velocity + effort feedforward (gravity, Coriolis,
+        commanded-velocity friction) + per-joint onboard p_gain/i_gain/d_gain (e.g. DuaDrive JointPositionVelocityTorquePidGains).
     validation:
-      one_of<>: [["effort", "position_velocity"]]
+      one_of<>: [["effort", "position_velocity", "position_velocity_torque_pid"]]
 
   position_control:
     ik_gain_pos:
       type: double
       default_value: 15.0
-      description: "CLIK translational error feedback gain [1/s] when command_mode == 'position_velocity'."
+      description: "CLIK translational error feedback gain [1/s] when command_mode is a position mode."
       validation:
         bounds<>: [0.0, 200.0]
     ik_gain_rot:
       type: double
       default_value: 15.0
-      description: "CLIK rotational error feedback gain [1/s] when command_mode == 'position_velocity'."
+      description: "CLIK rotational error feedback gain [1/s] when command_mode is a position mode."
       validation:
         bounds<>: [0.0, 200.0]
     nullspace_gain:
       type: double
       default_value: 2.0
-      description: "Nullspace posture gain [1/s] toward q_ref when command_mode == 'position_velocity'."
+      description: "Nullspace posture gain [1/s] toward q_ref when command_mode is a position mode."
       validation:
         bounds<>: [0.0, 50.0]
     max_joint_velocity:
       type: double
       default_value: 1.5
-      description: "Per-joint velocity clamp [rad/s] when command_mode == 'position_velocity'."
+      description: "Per-joint velocity clamp [rad/s] when command_mode is a position mode."
       validation:
         bounds<>: [0.01, 10.0]
     max_joint_lag:
@@ -63,6 +65,32 @@ cartesian_admittance_controller:
       description: "EMA smoothing factor (0..0.99) applied to dq_cmd before integrating q_ik += dq_cmd * dt, eliminating 100 Hz target_pose jitter for JTC-smooth JointPositionVelocity commands."
       validation:
         bounds<>: [0.0, 0.99]
+    use_gravity_feedforward:
+      type: bool
+      default_value: true
+      description: "Add Pinocchio generalized gravity feedforward to effort in 'position_velocity_torque_pid' mode."
+    use_coriolis_feedforward:
+      type: bool
+      default_value: true
+      description: "Add Pinocchio Coriolis/centrifugal feedforward to effort in 'position_velocity_torque_pid' mode."
+    friction_feedforward_scale:
+      type: double
+      default_value: 0.85
+      description: "Scale factor on commanded-velocity friction feedforward in 'position_velocity_torque_pid' mode."
+      validation:
+        bounds<>: [0.0, 1.5]
+    p_gains:
+      type: double_array
+      default_value: []
+      description: "Per-joint onboard drive P gains in 'position_velocity_torque_pid' mode (empty = keep drive defaults)."
+    i_gains:
+      type: double_array
+      default_value: []
+      description: "Per-joint onboard drive I gains in 'position_velocity_torque_pid' mode (empty = keep drive defaults)."
+    d_gains:
+      type: double_array
+      default_value: []
+      description: "Per-joint onboard drive D gains in 'position_velocity_torque_pid' mode (empty = keep drive defaults)."
 
   use_operational_space:
     type: bool
